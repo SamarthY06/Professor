@@ -1,0 +1,172 @@
+services:
+  # PostgreSQL with PGVector extension
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: professor-postgres
+    environment:
+      POSTGRES_USER: professor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-professor_dev_password}
+      POSTGRES_DB: professor
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U professor -d professor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - professor_network
+
+  # Redis for caching and sessions
+  redis:
+    image: redis:7-alpine
+    container_name: professor-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - ./data/redis:/data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - professor_network
+
+  # Temporal server for workflow orchestration
+  temporal:
+    image: temporalio/auto-setup:1.22
+    container_name: professor-temporal
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=professor
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:-professor_dev_password}
+      - POSTGRES_SEEDS=postgres
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
+    networks:
+      - professor_network
+
+  # Temporal UI for workflow monitoring
+  temporal-ui:
+    image: temporalio/ui:2.21.3
+    container_name: professor-temporal-ui
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      - temporal
+    ports:
+      - "8081:8080"
+    networks:
+      - professor_network
+
+  # Temporal worker for executing workflows
+  temporal-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: professor-temporal-worker
+    restart: on-failure:5
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor
+      - REDIS_URL=redis://redis:6379
+      - REDIS_HOST=redis
+      - TEMPORAL_HOST=temporal:7233
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    volumes:
+      - ./data/pdfs:/app/data/pdfs
+      - ./data/logs:/app/data/logs
+    networks:
+      - professor_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: professor-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor
+      - DATABASE_URL_SYNC=postgresql://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor
+      - REDIS_URL=redis://redis:6379
+      - REDIS_HOST=redis
+      - TEMPORAL_HOST=temporal:7233
+      - FRONTEND_URL=http://localhost:3000
+      - ENVIRONMENT=development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/pdfs:/app/data/pdfs
+      - ./data/logs:/app/data/logs
+      - ./data/cache:/app/data/cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - professor_network
+
+  # Next.js Frontend
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:8000
+    container_name: professor-web
+    env_file:
+      - ./backend/.env
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=${JWT_SECRET_KEY:-super_secret_key_change_in_production}
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    networks:
+      - professor_network
+
+networks:
+  professor_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
