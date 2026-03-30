@@ -20,7 +20,8 @@ from app.db.database import get_db
 from app.dependencies import get_current_user_id, get_redis
 from app.logs.logger import get_logger
 from app.models.book import Book
-from app.models.learning_config import LearningConfig, LearningPlan, ConversationState
+from app.models.learning_config import LearningConfig, LearningPlan
+from app.models.learning import LearningState
 from app.models.chat import ChatSession, ChatMessage
 
 logger = get_logger(__name__)
@@ -40,7 +41,7 @@ class PlanResponse(BaseModel):
     """Learning plan response."""
     id: UUID
     book_id: UUID
-    summary: str
+    summary: Optional[str] = None  # Maps to plan_summary in DB
     plan_data: dict
     status: str
     version: int
@@ -174,15 +175,20 @@ async def generate_learning_plan(
     }
 
     plan_data = {}
-    for _ in range(2):
+    for attempt in range(2):
         plan_result = await planner.process(planner_state)
-        plan_data = plan_result.get("learning_plan", {})
+        plan_data = plan_result.plan_data if hasattr(plan_result, 'plan_data') else plan_result.get("learning_plan", {})
         days = plan_data.get("days", [])
         day_numbers = [d.get("day") for d in days if isinstance(d, dict)]
-        if len(days) == target_days and sorted(day_numbers) == list(range(1, target_days + 1)):
-            break
+        
+        if days and len(days) > 0:
+            actual_days = len(days)
+            if sorted(day_numbers) == list(range(1, actual_days + 1)):
+                target_days = actual_days
+                break
     else:
-        raise HTTPException(status_code=500, detail="Plan generation failed to fit target days")
+        raise HTTPException(status_code=500, detail="Plan generation failed - invalid plan structure")
+    
     plan_data["total_days"] = target_days
     plan_data["daily_minutes"] = config.daily_study_minutes
     plan_data["learning_level"] = config.learning_level
@@ -232,24 +238,22 @@ async def generate_learning_plan(
         user_id=user_id,
         book_id=request.book_id,
         plan_data=plan_data,
-        summary=summary,
+        plan_summary=summary,  # DB column is plan_summary
         version=version,
         status="pending_review",
     )
     db.add(plan)
     
-    # Update conversation state
-    conv_result = await db.execute(
-        select(ConversationState)
-        .where(ConversationState.user_id == user_id)
-        .where(ConversationState.book_id == request.book_id)
+    # Update phase on LearningState
+    ls_result = await db.execute(
+        select(LearningState)
+        .where(LearningState.user_id == user_id)
+        .where(LearningState.book_id == request.book_id)
     )
-    conv_state = conv_result.scalar_one_or_none()
-    
-    if conv_state:
-        conv_state.phase = "plan_review"
-        conv_state.last_professor_action = "plan_generated"
-    
+    ls = ls_result.scalar_one_or_none()
+    if ls:
+        ls.current_phase = "plan_review"
+
     # Update config
     config.plan_generated = True
     
@@ -325,42 +329,80 @@ async def review_plan(
             config.plan_accepted = True
             config.plan_accepted_at = datetime.utcnow()
         
-        # Update conversation state
-        conv_result = await db.execute(
-            select(ConversationState)
-            .where(ConversationState.user_id == user_id)
-            .where(ConversationState.book_id == plan.book_id)
-        )
-        conv_state = conv_result.scalar_one_or_none()
-        
+        # Update LearningState phase and plan
         session_id = None
-        if conv_state:
-            conv_state.phase = "teaching"
-            conv_state.last_professor_action = "plan_accepted_ready_to_teach"
-            
-            # Create a teaching session
-            from app.models.learning import LearningState
-            state_result = await db.execute(
-                select(LearningState)
-                .where(LearningState.user_id == user_id)
-                .where(LearningState.book_id == plan.book_id)
+        state_result = await db.execute(
+            select(LearningState)
+            .where(LearningState.user_id == user_id)
+            .where(LearningState.book_id == plan.book_id)
+        )
+        learning_state = state_result.scalar_one_or_none()
+
+        if learning_state:
+            learning_state.current_phase = "teaching"
+            learning_state.learning_plan = plan.plan_data
+            from datetime import date
+            learning_state.plan_start_date = date.today()
+
+            session = ChatSession(
+                user_id=user_id,
+                learning_state_id=learning_state.id,
+                book_id=plan.book_id,
+                chapter_context=1,
+                session_type="teaching",
             )
-            learning_state = state_result.scalar_one_or_none()
-            
-            if learning_state:
-                learning_state.learning_plan = plan.plan_data
-                session = ChatSession(
-                    user_id=user_id,
-                    learning_state_id=learning_state.id,
-                    book_id=plan.book_id,
-                    chapter_context=1,
-                    session_type="teaching",
-                )
-                db.add(session)
-                await db.flush()
-                session_id = session.id
+            db.add(session)
+            await db.flush()
+            session_id = session.id
+
+            from app.models.chat import ChatMessage
+            from app.models.book import Book
+
+            book_result = await db.execute(
+                select(Book).where(Book.id == plan.book_id)
+            )
+            book = book_result.scalar_one_or_none()
+            book_title = book.title if book else "your book"
+
+            days = plan.plan_data.get("days", [])
+            day1 = days[0] if days else {}
+            day1_title = day1.get("day_title", "Getting Started")
+            day1_items = day1.get("items", [])
+            chapters_today = ", ".join([f"Chapter {item.get('chapter_number')}: {item.get('chapter_title', '')}" for item in day1_items])
+
+            greeting = f"""🎉 **Your learning plan is confirmed!**
+
+Welcome to Day 1 of your journey through **{book_title}**!
+
+**Today's Focus:** {day1_title}
+{f"**Chapters:** {chapters_today}" if chapters_today else ""}
+
+I'll guide you through today's material step by step. When you're ready, just say **"Let's start"** or **"Begin"** and we'll dive in!
+
+Remember: You can ask questions anytime, and I'll check your understanding as we go. Let's make this a great learning experience! 📚"""
+
+            initial_message = ChatMessage(
+                session_id=session.id,
+                role="assistant",
+                content=greeting,
+                agent_name="Professor",
+                chapter_at_time=1,
+            )
+            db.add(initial_message)
         
         await db.commit()
+
+        # Terminate any stale Temporal chat workflow so the next message
+        # starts a fresh one that reads the updated DB state (phase=teaching).
+        try:
+            from app.temporal.client import get_temporal_client
+            client = await get_temporal_client()
+            wf_id = f"chat-{user_id}-{plan.book_id}"
+            handle = client.get_workflow_handle(wf_id)
+            await handle.terminate("Plan accepted via REST — restarting for teaching phase")
+            logger.info("terminated_stale_workflow", workflow_id=wf_id)
+        except Exception:
+            pass  # No running workflow — that's fine
         
         logger.info(
             "learning_plan_accepted",
@@ -370,7 +412,7 @@ async def review_plan(
         
         return AcceptPlanResponse(
             success=True,
-            message="Excellent! Your learning plan is confirmed. Professor is ready to begin teaching Chapter 1!",
+            message="Excellent! Your learning plan is confirmed. Professor is ready to begin Day 1!",
             can_start_learning=True,
             session_id=session_id,
         )
@@ -424,7 +466,7 @@ async def get_current_plan(
     return PlanResponse(
         id=plan.id,
         book_id=plan.book_id,
-        summary=plan.summary,
+        summary=plan.plan_summary,  # DB column is plan_summary
         plan_data=plan.plan_data,
         status=plan.status,
         version=plan.version,

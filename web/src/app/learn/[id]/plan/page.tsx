@@ -16,6 +16,7 @@ import {
   GraduationCap,
 } from 'lucide-react';
 import api from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface DayItem {
   chapter_number: number;
@@ -54,6 +55,7 @@ export default function PlanPage() {
   const params = useParams();
   const router = useRouter();
   const bookId = params.id as string;
+  const { token, isLoading: authLoading, isAuthenticated } = useAuth();
 
   const [plan, setPlan] = useState<LearningPlan | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -62,28 +64,24 @@ export default function PlanPage() {
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [regenerateNotes, setRegenerateNotes] = useState('');
 
-  const getToken = () => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('professor_access_token') || '';
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.push('/login');
     }
-    return '';
-  };
+  }, [authLoading, isAuthenticated, router]);
 
   useEffect(() => {
-    const loadPlan = async () => {
-      const token = getToken();
-      if (!token) {
-        router.push('/login');
-        return;
-      }
+    if (authLoading || !isAuthenticated) return;
 
+    const t = token || '';
+    const loadPlan = async () => {
       try {
         setIsLoading(true);
-        const current = await api.planning.current(token, bookId);
+        const current = await api.planning.current(t, bookId);
         if (current) {
           setPlan(current as unknown as LearningPlan);
         } else {
-          const generated = await api.planning.generate(token, { book_id: bookId });
+          const generated = await api.planning.generate(t, { book_id: bookId });
           setPlan(generated as unknown as LearningPlan);
         }
       } catch (err: any) {
@@ -95,13 +93,13 @@ export default function PlanPage() {
     };
 
     loadPlan();
-  }, [bookId, router]);
+  }, [bookId, token, authLoading, isAuthenticated, router]);
 
   const handleAcceptPlan = async () => {
-    if (!plan) return;
+    if (!plan || !isAuthenticated) return;
     setIsAccepting(true);
     try {
-      await api.planning.review(getToken(), {
+      await api.planning.review(token || '', {
         plan_id: plan.id,
         feedback: '',
         action: 'accept',
@@ -116,9 +114,10 @@ export default function PlanPage() {
   };
 
   const handleRegenerate = async () => {
+    if (!isAuthenticated) return;
     setIsRegenerating(true);
     try {
-      const regenerated = await api.planning.generate(getToken(), {
+      const regenerated = await api.planning.generate(token || '', {
         book_id: bookId,
         additional_instructions: regenerateNotes || undefined,
       });
@@ -142,12 +141,12 @@ export default function PlanPage() {
     )
   ).length;
 
-  if (isLoading) {
+  if (authLoading || isLoading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
         <div className="text-center">
           <Loader2 className="h-8 w-8 animate-spin text-blue-600 mx-auto mb-4" />
-          <p className="text-gray-600">Loading your learning plan...</p>
+          <p className="text-gray-600 dark:text-gray-300">Loading your learning plan...</p>
         </div>
       </div>
     );
@@ -155,11 +154,11 @@ export default function PlanPage() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
         <div className="text-center">
           <AlertCircle className="h-8 w-8 text-red-600 mx-auto mb-4" />
-          <p className="text-gray-900 font-medium mb-2">Failed to load plan</p>
-          <p className="text-gray-600 mb-4">{error}</p>
+          <p className="text-gray-900 dark:text-gray-100 font-medium mb-2">Failed to load plan</p>
+          <p className="text-gray-600 dark:text-gray-300 mb-4">{error}</p>
           <Link
             href="/dashboard"
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
@@ -174,13 +173,13 @@ export default function PlanPage() {
   if (!plan) return null;
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       {/* Header */}
-      <header className="bg-white border-b">
+      <header className="bg-white dark:bg-gray-800 border-b dark:border-gray-700">
         <div className="max-w-4xl mx-auto px-6 py-4">
           <Link
             href="/dashboard"
-            className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900"
+            className="inline-flex items-center gap-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100"
           >
             <ArrowLeft className="h-4 w-4" />
             Back to Dashboard
@@ -194,39 +193,39 @@ export default function PlanPage() {
           <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Brain className="h-8 w-8 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900 mb-2">
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2">
             Your Learning Plan
           </h1>
-          <p className="text-gray-600">Plan Version {plan.version}</p>
+          <p className="text-gray-600 dark:text-gray-300">Plan Version {plan.version}</p>
         </div>
 
         {/* Summary Cards */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div className="bg-white rounded-xl border p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 text-center">
             <Calendar className="h-6 w-6 text-blue-600 mx-auto mb-2" />
-            <div className="text-2xl font-bold text-gray-900">{totalDays}</div>
-            <div className="text-sm text-gray-500">Days</div>
+            <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{totalDays}</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">Days</div>
           </div>
-          <div className="bg-white rounded-xl border p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 text-center">
             <BookOpen className="h-6 w-6 text-green-600 mx-auto mb-2" />
-            <div className="text-2xl font-bold text-gray-900">{totalChapters}</div>
-            <div className="text-sm text-gray-500">Chapters</div>
+            <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{totalChapters}</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">Chapters</div>
           </div>
-          <div className="bg-white rounded-xl border p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 text-center">
             <Clock className="h-6 w-6 text-purple-600 mx-auto mb-2" />
-            <div className="text-2xl font-bold text-gray-900">{dailyMinutes ?? '-'}</div>
-            <div className="text-sm text-gray-500">Min/Day</div>
+            <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{dailyMinutes ?? '-'}</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">Min/Day</div>
           </div>
-          <div className="bg-white rounded-xl border p-4 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 text-center">
             <GraduationCap className="h-6 w-6 text-orange-600 mx-auto mb-2" />
-            <div className="text-2xl font-bold text-gray-900 capitalize">{learningLevel ?? '-'}</div>
-            <div className="text-sm text-gray-500">Level</div>
+            <div className="text-2xl font-bold text-gray-900 dark:text-gray-100 capitalize">{learningLevel ?? '-'}</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">Level</div>
           </div>
         </div>
 
         {/* Timeline */}
-        <div className="bg-white rounded-2xl border p-6 mb-8">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <div className="bg-white dark:bg-gray-800 rounded-2xl border dark:border-gray-700 p-6 mb-8">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2">
             <Calendar className="h-5 w-5 text-blue-600" />
             Day-by-Day Schedule
           </h2>
@@ -236,21 +235,21 @@ export default function PlanPage() {
               const totalMinutes = day.items.reduce((sum, item) => sum + item.estimated_minutes, 0);
               const hasQuiz = day.items.some(item => item.quiz_after);
               return (
-                <div key={day.day} className="border rounded-xl p-4 hover:border-blue-200 transition">
+                <div key={day.day} className="border dark:border-gray-700 rounded-xl p-4 hover:border-blue-200 dark:hover:border-blue-700 transition">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                        <span className="font-bold text-blue-600">{day.day}</span>
+                      <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center">
+                        <span className="font-bold text-blue-600 dark:text-blue-400">{day.day}</span>
                       </div>
                       <div>
-                        <h3 className="font-medium text-gray-900">Day {day.day}</h3>
-                        <p className="text-sm text-gray-500">
+                        <h3 className="font-medium text-gray-900 dark:text-gray-100">Day {day.day}</h3>
+                        <p className="text-sm text-gray-500 dark:text-gray-400">
                           {day.rest ? 'Review or rest' : `${totalMinutes} minutes`}
                         </p>
                       </div>
                     </div>
                     {!day.rest && hasQuiz && (
-                      <span className="px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full text-xs font-medium">
+                      <span className="px-3 py-1 bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-400 rounded-full text-xs font-medium">
                         📝 Quiz
                       </span>
                     )}
@@ -259,22 +258,22 @@ export default function PlanPage() {
                   <div className="pl-13 space-y-2">
                     {day.rest ? (
                       <div className="flex items-center gap-2 text-sm">
-                        <CheckCircle className="h-4 w-4 text-gray-300" />
-                        <span className="text-gray-700">Review, recap, or rest</span>
+                        <CheckCircle className="h-4 w-4 text-gray-300 dark:text-gray-600" />
+                        <span className="text-gray-700 dark:text-gray-200">Review, recap, or rest</span>
                       </div>
                     ) : (
                       day.items.map((item, idx) => (
                         <div key={idx} className="flex items-start gap-2 text-sm">
-                          <CheckCircle className="h-4 w-4 text-gray-300 mt-0.5" />
-                          <div className="text-gray-700">
+                          <CheckCircle className="h-4 w-4 text-gray-300 dark:text-gray-600 mt-0.5" />
+                          <div className="text-gray-700 dark:text-gray-200">
                             <div>{item.chapter_title} ({item.estimated_minutes} min)</div>
                             {item.topics?.length > 0 && (
-                              <div className="text-gray-500">
+                              <div className="text-gray-500 dark:text-gray-400">
                                 Topics: {item.topics.join(', ')}
                               </div>
                             )}
                             {item.quiz_after && (
-                              <div className="text-yellow-600">Quiz after this session</div>
+                              <div className="text-yellow-600 dark:text-yellow-500">Quiz after this session</div>
                             )}
                           </div>
                         </div>
@@ -295,12 +294,12 @@ export default function PlanPage() {
               onChange={(e) => setRegenerateNotes(e.target.value)}
               placeholder="Request changes or add preferences for a new plan"
               rows={3}
-              className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none resize-none"
+              className="w-full px-4 py-3 border dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-300 dark:focus:border-blue-500 outline-none resize-none dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
             />
             <button
               onClick={handleRegenerate}
               disabled={isRegenerating}
-              className="mt-3 px-6 py-3 bg-white border border-blue-600 text-blue-600 rounded-xl font-medium hover:bg-blue-50 transition disabled:opacity-50"
+              className="mt-3 px-6 py-3 bg-white dark:bg-gray-800 border border-blue-600 text-blue-600 dark:text-blue-400 rounded-xl font-medium hover:bg-blue-50 dark:hover:bg-gray-700 transition disabled:opacity-50"
             >
               {isRegenerating ? 'Regenerating...' : 'Regenerate Plan'}
             </button>
@@ -322,7 +321,7 @@ export default function PlanPage() {
               </>
             )}
           </button>
-          <p className="text-sm text-gray-500 mt-3">
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-3">
             You can adjust the plan at any time during your learning journey
           </p>
         </div>

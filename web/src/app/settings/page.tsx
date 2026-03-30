@@ -41,6 +41,14 @@ interface ApiKeyStatus {
   using_default: boolean;
 }
 
+interface UsageSummary {
+  tier: string;
+  cost_cents: number;
+  total_requests: number;
+  tokens: { input: number; output: number; total: number };
+  preferred_model: string | null;
+}
+
 export default function SettingsPage() {
   const router = useRouter();
   const { token, isLoading: authLoading, isAuthenticated, refreshUser } = useAuth();
@@ -57,6 +65,9 @@ export default function SettingsPage() {
   const [newApiKey, setNewApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [isValidatingKey, setIsValidatingKey] = useState(false);
+  
+  // BYOK Usage state
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   
   // Settings state
   const [settings, setSettings] = useState<UserSettings>({
@@ -85,14 +96,16 @@ export default function SettingsPage() {
   // Fetch data
   useEffect(() => {
     const fetchData = async () => {
-      if (!token) return;
+      if (!isAuthenticated) return;
       
       setIsLoading(true);
       try {
-        const [profileData, settingsData, apiKeyData] = await Promise.all([
-          api.users.getProfile(token),
-          api.users.getSettings(token),
-          api.users.getApiKeyStatus(token),
+        const t = token || '';
+        const [profileData, settingsData, apiKeyData, usageData] = await Promise.all([
+          api.users.getProfile(t),
+          api.users.getSettings(t),
+          api.users.getApiKeyStatus(t),
+          api.usage.getSummary(t).catch(() => null),
         ]);
         
         setProfile(profileData);
@@ -107,6 +120,16 @@ export default function SettingsPage() {
         });
         
         setApiKeyStatus(apiKeyData);
+        
+        if (usageData) {
+          setUsageSummary({
+            tier: usageData.tier,
+            cost_cents: usageData.cost_cents,
+            total_requests: usageData.total_requests,
+            tokens: usageData.tokens,
+            preferred_model: usageData.preferred_model,
+          });
+        }
       } catch (err) {
         console.error('Failed to fetch settings:', err);
       } finally {
@@ -114,17 +137,17 @@ export default function SettingsPage() {
       }
     };
 
-    if (token) {
+    if (isAuthenticated) {
       fetchData();
     }
-  }, [token]);
+  }, [isAuthenticated, token]);
 
   const handleSaveProfile = async () => {
-    if (!token) return;
+    if (!isAuthenticated) return;
     
     setIsSaving(true);
     try {
-      await api.users.updateProfile(token, {
+      await api.users.updateProfile(token || '', {
         name: profileName,
         phone: profilePhone || undefined,
       });
@@ -140,11 +163,11 @@ export default function SettingsPage() {
   };
 
   const handleSaveSettings = async () => {
-    if (!token) return;
+    if (!isAuthenticated) return;
     
     setIsSaving(true);
     try {
-      await api.users.updateSettings(token, settings as unknown as Record<string, unknown>);
+      await api.users.updateSettings(token || '', settings as unknown as Record<string, unknown>);
       setSaveMessage({ type: 'success', text: 'Settings saved successfully!' });
     } catch (err: any) {
       setSaveMessage({ type: 'error', text: err.message || 'Failed to save settings' });
@@ -155,14 +178,14 @@ export default function SettingsPage() {
   };
 
   const handleValidateApiKey = async () => {
-    if (!newApiKey || !token) return;
+    if (!newApiKey || !isAuthenticated) return;
     
     setIsValidatingKey(true);
     try {
-      await api.users.saveApiKey(token, newApiKey, true);
+      await api.users.saveApiKey(token || '', newApiKey, true);
       
       // Refresh API key status
-      const apiKeyData = await api.users.getApiKeyStatus(token);
+      const apiKeyData = await api.users.getApiKeyStatus(token || '');
       setApiKeyStatus(apiKeyData);
       setNewApiKey('');
       setSaveMessage({ type: 'success', text: 'API key validated and saved!' });
@@ -175,10 +198,10 @@ export default function SettingsPage() {
   };
 
   const handleDeleteApiKey = async () => {
-    if (!confirm('Are you sure you want to delete your API key?') || !token) return;
+    if (!confirm('Are you sure you want to delete your API key?') || !isAuthenticated) return;
     
     try {
-      await api.users.deleteApiKey(token);
+      await api.users.deleteApiKey(token || '');
       
       setApiKeyStatus({
         has_key: false,
@@ -199,33 +222,32 @@ export default function SettingsPage() {
     { id: 'profile', label: 'Profile', icon: User },
     { id: 'api', label: 'API Key', icon: Key },
     { id: 'notifications', label: 'Notifications', icon: Bell },
-    { id: 'learning', label: 'Learning', icon: BookOpen },
     { id: 'privacy', label: 'Privacy', icon: Shield },
   ] as const;
 
   if (authLoading || !isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       {/* Header */}
-      <div className="bg-white border-b">
+      <div className="bg-white dark:bg-gray-800 border-b dark:border-gray-700">
         <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex items-center gap-4">
             <Link 
               href="/dashboard"
-              className="p-2 hover:bg-gray-100 rounded-lg"
+              className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg text-gray-900 dark:text-gray-100"
             >
               <ArrowLeft className="w-5 h-5" />
             </Link>
             <div>
-              <h1 className="text-xl font-bold">Settings</h1>
-              <p className="text-sm text-gray-500">
+              <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Settings</h1>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
                 Manage your account and preferences
               </p>
             </div>
@@ -250,8 +272,8 @@ export default function SettingsPage() {
                     onClick={() => setActiveTab(tab.id)}
                     className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors ${
                       activeTab === tab.id
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'hover:bg-gray-100 text-gray-600'
+                        ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400'
+                        : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
                     }`}
                   >
                     <tab.icon className="w-4 h-4" />
@@ -267,8 +289,8 @@ export default function SettingsPage() {
               {saveMessage && (
                 <div className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${
                   saveMessage.type === 'success' 
-                    ? 'bg-green-50 text-green-700 border border-green-200'
-                    : 'bg-red-50 text-red-700 border border-red-200'
+                    ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800'
+                    : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800'
                 }`}>
                   {saveMessage.type === 'success' ? (
                     <Check className="w-4 h-4" />
@@ -281,35 +303,35 @@ export default function SettingsPage() {
               
               {/* Profile Tab */}
               {activeTab === 'profile' && (
-                <div className="bg-white border rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">Profile Information</h2>
+                <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl p-6">
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Profile Information</h2>
                   
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-sm font-medium mb-1">Name</label>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Name</label>
                       <input
                         type="text"
                         value={profileName}
                         onChange={(e) => setProfileName(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                        className="w-full px-3 py-2 border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-300 dark:focus:border-blue-500"
                       />
                     </div>
                     
                     <div>
-                      <label className="block text-sm font-medium mb-1">Email</label>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Email</label>
                       <input
                         type="email"
                         value={profile?.email || ''}
                         disabled
-                        className="w-full px-3 py-2 border rounded-lg bg-gray-50 cursor-not-allowed"
+                        className="w-full px-3 py-2 border dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-400 cursor-not-allowed"
                       />
-                      <p className="text-xs text-gray-500 mt-1">
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         Email is managed through your account
                       </p>
                     </div>
                     
                     <div>
-                      <label className="block text-sm font-medium mb-1">
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
                         <span className="flex items-center gap-2">
                           <Phone className="w-4 h-4" />
                           Phone Number (for WhatsApp reminders)
@@ -320,19 +342,19 @@ export default function SettingsPage() {
                         value={profilePhone}
                         onChange={(e) => setProfilePhone(e.target.value)}
                         placeholder="+1 234 567 8900"
-                        className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                        className="w-full px-3 py-2 border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-300 dark:focus:border-blue-500"
                       />
-                      <p className="text-xs text-gray-500 mt-1">
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         Used for WhatsApp study reminders. Include country code.
                       </p>
                     </div>
                     
                     <div>
-                      <label className="block text-sm font-medium mb-1">Timezone</label>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Timezone</label>
                       <select
                         value={settings.timezone}
                         onChange={(e) => setSettings({ ...settings, timezone: e.target.value })}
-                        className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                        className="w-full px-3 py-2 border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-300 dark:focus:border-blue-500"
                       >
                         <option value="America/New_York">Eastern Time (ET)</option>
                         <option value="America/Chicago">Central Time (CT)</option>
@@ -361,51 +383,103 @@ export default function SettingsPage() {
               
               {/* API Key Tab */}
               {activeTab === 'api' && (
-                <div className="bg-white border rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">OpenAI API Key</h2>
+                <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl p-6">
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">OpenAI API Key</h2>
                   
-                  <p className="text-gray-600 mb-4">
+                  <p className="text-gray-600 dark:text-gray-300 mb-4">
                     Professor uses OpenAI's GPT-4o model for personalized teaching. 
                     You can use your own API key or use the default one.
                   </p>
+                  
+                  {/* BYOK Usage Summary */}
+                  {usageSummary?.tier === 'byok' && (
+                    <div className="mb-6 p-4 bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="p-2 bg-emerald-100 dark:bg-emerald-900/40 rounded-lg">
+                            <Key className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                          </div>
+                          <span className="font-semibold text-emerald-800 dark:text-emerald-300">BYOK Active</span>
+                        </div>
+                        <Link
+                          href="/usage"
+                          className="text-sm text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 font-medium flex items-center gap-1"
+                        >
+                          View Dashboard
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                        </Link>
+                      </div>
+                      
+                      <div className="grid grid-cols-3 gap-4">
+                        <div>
+                          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+                            ${(usageSummary.cost_cents / 100).toFixed(2)}
+                          </div>
+                          <div className="text-xs text-emerald-600 dark:text-emerald-500">This Month</div>
+                        </div>
+                        <div>
+                          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+                            {usageSummary.total_requests.toLocaleString()}
+                          </div>
+                          <div className="text-xs text-emerald-600 dark:text-emerald-500">Requests</div>
+                        </div>
+                        <div>
+                          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+                            {(usageSummary.tokens.total / 1000).toFixed(1)}K
+                          </div>
+                          <div className="text-xs text-emerald-600 dark:text-emerald-500">Tokens</div>
+                        </div>
+                      </div>
+                      
+                      {usageSummary.preferred_model && (
+                        <div className="mt-3 pt-3 border-t border-emerald-200 dark:border-emerald-800">
+                          <span className="text-sm text-emerald-600 dark:text-emerald-400">
+                            Current Model: <span className="font-medium">{usageSummary.preferred_model}</span>
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   
                   {/* Current Key Status */}
                   <div className={`p-4 rounded-lg mb-4 ${
                     apiKeyStatus?.has_key
                       ? apiKeyStatus.is_valid
-                        ? 'bg-green-50 border border-green-200'
-                        : 'bg-yellow-50 border border-yellow-200'
-                      : 'bg-gray-50 border border-gray-200'
+                        ? 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800'
+                        : 'bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800'
+                      : 'bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700'
                   }`}>
                     <div className="flex items-center gap-2">
                       {apiKeyStatus?.has_key ? (
                         apiKeyStatus.is_valid ? (
                           <>
-                            <Check className="w-5 h-5 text-green-600" />
-                            <span className="font-medium text-green-700">Your API key is active</span>
+                            <Check className="w-5 h-5 text-green-600 dark:text-green-400" />
+                            <span className="font-medium text-green-700 dark:text-green-400">Your API key is active</span>
                           </>
                         ) : (
                           <>
-                            <AlertCircle className="w-5 h-5 text-yellow-600" />
-                            <span className="font-medium text-yellow-700">API key needs validation</span>
+                            <AlertCircle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+                            <span className="font-medium text-yellow-700 dark:text-yellow-400">API key needs validation</span>
                           </>
                         )
                       ) : (
                         <>
-                          <AlertCircle className="w-5 h-5 text-gray-500" />
-                          <span className="font-medium text-gray-700">Using default API key</span>
+                          <AlertCircle className="w-5 h-5 text-gray-500 dark:text-gray-400" />
+                          <span className="font-medium text-gray-700 dark:text-gray-200">Using default API key</span>
                         </>
                       )}
                     </div>
                     
                     {apiKeyStatus?.masked_key && (
-                      <p className="text-sm text-gray-600 mt-1">
+                      <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
                         Key: {apiKeyStatus.masked_key}
                       </p>
                     )}
                     
                     {apiKeyStatus?.last_validated && (
-                      <p className="text-xs text-gray-500 mt-1">
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         Last validated: {new Date(apiKeyStatus.last_validated).toLocaleString()}
                       </p>
                     )}
@@ -413,7 +487,7 @@ export default function SettingsPage() {
                   
                   {/* Add/Update Key */}
                   <div className="space-y-3">
-                    <label className="block text-sm font-medium">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">
                       {apiKeyStatus?.has_key ? 'Update API Key' : 'Add Your Own API Key'}
                     </label>
                     
@@ -424,11 +498,11 @@ export default function SettingsPage() {
                           value={newApiKey}
                           onChange={(e) => setNewApiKey(e.target.value)}
                           placeholder="sk-..."
-                          className="w-full px-3 py-2 pr-10 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300"
+                          className="w-full px-3 py-2 pr-10 border dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-300 dark:focus:border-blue-500"
                         />
                         <button
                           onClick={() => setShowApiKey(!showApiKey)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                         >
                           {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                         </button>
@@ -443,7 +517,7 @@ export default function SettingsPage() {
                       </button>
                     </div>
                     
-                    <p className="text-xs text-gray-500">
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
                       Get your API key from{' '}
                       <a 
                         href="https://platform.openai.com/api-keys" 
@@ -458,10 +532,10 @@ export default function SettingsPage() {
                   
                   {/* Delete Key */}
                   {apiKeyStatus?.has_key && (
-                    <div className="mt-6 pt-6 border-t">
+                    <div className="mt-6 pt-6 border-t dark:border-gray-700">
                       <button
                         onClick={handleDeleteApiKey}
-                        className="flex items-center gap-2 text-red-600 hover:text-red-700"
+                        className="flex items-center gap-2 text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
                       >
                         <Trash2 className="w-4 h-4" />
                         Delete API Key (use default)
@@ -473,18 +547,18 @@ export default function SettingsPage() {
               
               {/* Notifications Tab */}
               {activeTab === 'notifications' && (
-                <div className="bg-white border rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">Notification Preferences</h2>
+                <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl p-6">
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Notification Preferences</h2>
                   
                   <div className="space-y-4">
                     {[
                       { key: 'email', label: 'Email Notifications', desc: 'Receive updates via email' },
                       { key: 'whatsapp', label: 'WhatsApp Reminders', desc: 'Get study reminders on WhatsApp (requires phone number)' },
                     ].map((item) => (
-                      <div key={item.key} className="flex items-center justify-between p-4 border rounded-lg">
+                      <div key={item.key} className="flex items-center justify-between p-4 border dark:border-gray-700 rounded-lg">
                         <div>
-                          <div className="font-medium">{item.label}</div>
-                          <div className="text-sm text-gray-500">{item.desc}</div>
+                          <div className="font-medium text-gray-900 dark:text-gray-100">{item.label}</div>
+                          <div className="text-sm text-gray-500 dark:text-gray-400">{item.desc}</div>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer">
                           <input
@@ -499,7 +573,7 @@ export default function SettingsPage() {
                             })}
                             className="sr-only peer"
                           />
-                          <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                          <div className="w-11 h-6 bg-gray-200 dark:bg-gray-600 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-100 dark:peer-focus:ring-blue-900/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white dark:after:bg-gray-300 after:border-gray-300 dark:after:border-gray-600 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                         </label>
                       </div>
                     ))}
@@ -518,111 +592,15 @@ export default function SettingsPage() {
                 </div>
               )}
               
-              {/* Learning Tab */}
-              {activeTab === 'learning' && (
-                <div className="bg-white border rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">Learning Preferences</h2>
-                  
-                  <div className="space-y-6">
-                    {/* Professor Style */}
-                    <div>
-                      <label className="block text-sm font-medium mb-3">Professor Style</label>
-                      <div className="grid grid-cols-3 gap-3">
-                        {[
-                          { value: 'strict', label: 'Strict', desc: 'PhD level - rigorous, detailed' },
-                          { value: 'balanced', label: 'Balanced', desc: 'Graduate level - mix of support' },
-                          { value: 'encouraging', label: 'Encouraging', desc: 'Undergraduate - supportive' },
-                        ].map((style) => (
-                          <button
-                            key={style.value}
-                            onClick={() => setSettings({ ...settings, professor_style: style.value as any })}
-                            className={`p-4 border rounded-lg text-left transition-colors ${
-                              settings.professor_style === style.value
-                                ? 'border-blue-500 bg-blue-50'
-                                : 'hover:border-blue-300'
-                            }`}
-                          >
-                            <div className="font-medium">{style.label}</div>
-                            <div className="text-xs text-gray-500 mt-1">{style.desc}</div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    
-                    {/* Preferred Study Time */}
-                    <div>
-                      <label className="block text-sm font-medium mb-3">Preferred Study Time</label>
-                      <div className="grid grid-cols-3 gap-3">
-                        {[
-                          { value: 'morning', label: '🌅 Morning', desc: '6 AM - 12 PM' },
-                          { value: 'afternoon', label: '☀️ Afternoon', desc: '12 PM - 6 PM' },
-                          { value: 'evening', label: '🌙 Evening', desc: '6 PM - 12 AM' },
-                        ].map((time) => (
-                          <button
-                            key={time.value}
-                            onClick={() => setSettings({
-                              ...settings,
-                              study_schedule: { ...settings.study_schedule!, preferred_time: time.value },
-                            })}
-                            className={`p-4 border rounded-lg text-left transition-colors ${
-                              settings.study_schedule?.preferred_time === time.value
-                                ? 'border-blue-500 bg-blue-50'
-                                : 'hover:border-blue-300'
-                            }`}
-                          >
-                            <div className="font-medium">{time.label}</div>
-                            <div className="text-xs text-gray-500 mt-1">{time.desc}</div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    
-                    {/* Daily Goal */}
-                    <div>
-                      <label className="block text-sm font-medium mb-3">
-                        Daily Study Goal: {settings.study_schedule?.daily_goal_minutes || 30} minutes
-                      </label>
-                      <input
-                        type="range"
-                        min="15"
-                        max="120"
-                        step="15"
-                        value={settings.study_schedule?.daily_goal_minutes || 30}
-                        onChange={(e) => setSettings({
-                          ...settings,
-                          study_schedule: { ...settings.study_schedule!, daily_goal_minutes: parseInt(e.target.value) },
-                        })}
-                        className="w-full"
-                      />
-                      <div className="flex justify-between text-xs text-gray-500 mt-1">
-                        <span>15 min</span>
-                        <span>2 hours</span>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="mt-6 pt-4">
-                    <button
-                      onClick={handleSaveSettings}
-                      disabled={isSaving}
-                      className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                    >
-                      {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                      Save Settings
-                    </button>
-                  </div>
-                </div>
-              )}
-              
               {/* Privacy Tab */}
               {activeTab === 'privacy' && (
-                <div className="bg-white border rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">Privacy & Security</h2>
+                <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl p-6">
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Privacy & Security</h2>
                   
                   <div className="space-y-6">
-                    <div className="p-4 bg-gray-50 rounded-lg">
-                      <h3 className="font-medium mb-2">Data Protection</h3>
-                      <ul className="text-sm text-gray-600 space-y-1">
+                    <div className="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg">
+                      <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-2">Data Protection</h3>
+                      <ul className="text-sm text-gray-600 dark:text-gray-300 space-y-1">
                         <li>• Your API keys are encrypted using AES-256</li>
                         <li>• Chat history is stored securely in our database</li>
                         <li>• We never share your data with third parties</li>
@@ -631,22 +609,22 @@ export default function SettingsPage() {
                     </div>
                     
                     <div className="space-y-3">
-                      <h3 className="font-medium">Data Management</h3>
+                      <h3 className="font-medium text-gray-900 dark:text-gray-100">Data Management</h3>
                       
-                      <button className="w-full p-3 border rounded-lg text-left hover:bg-gray-50 flex items-center justify-between">
+                      <button className="w-full p-3 border dark:border-gray-700 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center justify-between">
                         <div>
-                          <div className="font-medium">Export My Data</div>
-                          <div className="text-sm text-gray-500">Download all your data</div>
+                          <div className="font-medium text-gray-900 dark:text-gray-100">Export My Data</div>
+                          <div className="text-sm text-gray-500 dark:text-gray-400">Download all your data</div>
                         </div>
                         <span className="text-blue-600">Export</span>
                       </button>
                       
-                      <button className="w-full p-3 border border-red-200 rounded-lg text-left hover:bg-red-50 flex items-center justify-between">
+                      <button className="w-full p-3 border border-red-200 dark:border-red-800 rounded-lg text-left hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center justify-between">
                         <div>
-                          <div className="font-medium text-red-600">Delete Account</div>
-                          <div className="text-sm text-gray-500">Permanently delete all data</div>
+                          <div className="font-medium text-red-600 dark:text-red-400">Delete Account</div>
+                          <div className="text-sm text-gray-500 dark:text-gray-400">Permanently delete all data</div>
                         </div>
-                        <Trash2 className="w-5 h-5 text-red-600" />
+                        <Trash2 className="w-5 h-5 text-red-600 dark:text-red-400" />
                       </button>
                     </div>
                   </div>

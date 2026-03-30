@@ -16,6 +16,7 @@ interface SignupData {
   password: string
   name: string
   phone?: string
+  verification_code?: string
 }
 
 interface AuthContextType {
@@ -25,6 +26,7 @@ interface AuthContextType {
   isAuthenticated: boolean
   signup: (data: SignupData) => Promise<void>
   signin: (email: string, password: string) => Promise<void>
+  googleLogin: (code: string, redirectUri: string) => Promise<void>
   login: (email: string, name?: string) => Promise<void>
   logout: () => void
   refreshUser: () => Promise<void>
@@ -32,52 +34,35 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
-const TOKEN_KEY = 'professor_access_token'
-const REFRESH_TOKEN_KEY = 'professor_refresh_token'
+/**
+ * Auth tokens are now stored in httpOnly cookies set by the backend.
+ * We keep a thin `token` state for any callers that still need it
+ * (e.g. explicit Authorization headers), but the primary auth
+ * mechanism is the cookie sent automatically by the browser via
+ * `credentials: 'include'`.
+ */
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [token, setToken] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
-  const fetchUser = useCallback(async (accessToken: string) => {
+  const fetchUser = useCallback(async (accessToken?: string) => {
     try {
-      const userData = await api.auth.getCurrentUser(accessToken)
+      const userData = await api.auth.getCurrentUser(accessToken || '')
       setUser(userData)
       return userData
-    } catch (error) {
-      console.error('Failed to fetch user:', error)
-      // Token might be expired, try to refresh
-      const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
-      if (refreshToken) {
-        try {
-          const tokens = await api.auth.refreshToken(refreshToken)
-          localStorage.setItem(TOKEN_KEY, tokens.access_token)
-          localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token)
-          setToken(tokens.access_token)
-          const userData = await api.auth.getCurrentUser(tokens.access_token)
-          setUser(userData)
-          return userData
-        } catch {
-          // Refresh failed, clear tokens
-          localStorage.removeItem(TOKEN_KEY)
-          localStorage.removeItem(REFRESH_TOKEN_KEY)
-          setToken(null)
-          setUser(null)
-        }
-      }
+    } catch {
+      setToken(null)
+      setUser(null)
       return null
     }
   }, [])
 
-  // Initialize auth state from localStorage
   useEffect(() => {
     const initAuth = async () => {
-      const storedToken = localStorage.getItem(TOKEN_KEY)
-      if (storedToken) {
-        setToken(storedToken)
-        await fetchUser(storedToken)
-      }
+      // Try cookie-based auth first (no token needed)
+      await fetchUser()
       setIsLoading(false)
     }
     initAuth()
@@ -87,13 +72,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(true)
     try {
       const tokens = await api.auth.signup(data)
-      localStorage.setItem(TOKEN_KEY, tokens.access_token)
-      localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token)
       setToken(tokens.access_token)
       await fetchUser(tokens.access_token)
-    } catch (error) {
-      console.error('Signup failed:', error)
-      throw error
     } finally {
       setIsLoading(false)
     }
@@ -103,13 +83,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(true)
     try {
       const tokens = await api.auth.signin(email, password)
-      localStorage.setItem(TOKEN_KEY, tokens.access_token)
-      localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token)
       setToken(tokens.access_token)
       await fetchUser(tokens.access_token)
-    } catch (error) {
-      console.error('Signin failed:', error)
-      throw error
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const googleLogin = async (code: string, redirectUri: string) => {
+    setIsLoading(true)
+    try {
+      const tokens = await api.auth.googleLogin(code, redirectUri)
+      setToken(tokens.access_token)
+      await fetchUser(tokens.access_token)
     } finally {
       setIsLoading(false)
     }
@@ -119,29 +105,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(true)
     try {
       const tokens = await api.auth.devLogin(email, name)
-      localStorage.setItem(TOKEN_KEY, tokens.access_token)
-      localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token)
       setToken(tokens.access_token)
       await fetchUser(tokens.access_token)
-    } catch (error) {
-      console.error('Login failed:', error)
-      throw error
     } finally {
       setIsLoading(false)
     }
   }
 
-  const logout = () => {
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(REFRESH_TOKEN_KEY)
+  const logout = async () => {
+    try {
+      await api.auth.logout()
+    } catch {
+      // ignore — cookie may already be gone
+    }
     setToken(null)
     setUser(null)
   }
 
   const refreshUser = async () => {
-    if (token) {
-      await fetchUser(token)
-    }
+    await fetchUser(token || undefined)
   }
 
   return (
@@ -150,9 +132,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         user,
         token,
         isLoading,
-        isAuthenticated: !!user && !!token,
+        isAuthenticated: !!user,
         signup,
         signin,
+        googleLogin,
         login,
         logout,
         refreshUser,

@@ -14,11 +14,18 @@ from app.db.database import Base, get_db
 from app.config import settings
 
 
-# Test database URL
+# Test database URL - prefer DATABASE_URL for integration tests (skip if not set)
+DATABASE_URL = os.getenv("DATABASE_URL")
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
     "postgresql+asyncpg://professor:professor_dev_password@localhost:5432/professor_test"
 )
+
+# Convert postgresql:// to postgresql+asyncpg:// if needed
+def _ensure_async_url(url: str) -> str:
+    if url and url.startswith("postgresql://") and "+asyncpg" not in url:
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url or ""
 
 
 @pytest.fixture(scope="session")
@@ -31,46 +38,76 @@ def event_loop() -> Generator:
 
 @pytest_asyncio.fixture(scope="session")
 async def test_engine():
-    """Create test database engine."""
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-    
+    """Create test database engine (uses TEST_DATABASE_URL)."""
+    url = TEST_DATABASE_URL
+    engine = create_async_engine(url, echo=False)
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
+
     yield engine
-    
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
-    
+
     await engine.dispose()
 
 
 @pytest_asyncio.fixture
-async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
-    """Create a test database session."""
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Test database session using DATABASE_URL. Skips if DATABASE_URL is not set.
+    Use for integration tests that require a real database.
+    """
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set - skipping database-dependent tests")
+
+    url = _ensure_async_url(DATABASE_URL)
+    engine = create_async_engine(url, echo=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async_session = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    async with async_session() as session:
+        yield session
+        await session.rollback()
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_session_always(test_engine) -> AsyncGenerator[AsyncSession, None]:
+    """Create a test database session using TEST_DATABASE_URL (never skips)."""
     async_session = async_sessionmaker(
         test_engine,
         class_=AsyncSession,
         expire_on_commit=False,
     )
-    
+
     async with async_session() as session:
         yield session
         await session.rollback()
 
 
 @pytest_asyncio.fixture
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+async def client(db_session_always: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     """Create test client with database override."""
-    
     async def override_get_db():
-        yield db_session
-    
+        yield db_session_always
+
     app.dependency_overrides[get_db] = override_get_db
-    
+
     async with AsyncClient(app=app, base_url="http://test") as ac:
         yield ac
-    
+
     app.dependency_overrides.clear()
 
 

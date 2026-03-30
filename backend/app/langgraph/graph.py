@@ -1,25 +1,17 @@
-"""
-LangGraph workflow for Professor - Simplified Agent-Driven Architecture.
+"""LangGraph workflow for Professor - TRUE Agent-Driven Architecture.
 
-KEY DESIGN PRINCIPLES:
-1. Agent-Driven, Not Intent-Driven
-   - Agents drive the conversation through their orchestrator prompts
-   - No explicit intent classification for most interactions
-   
-2. Only 3 Active Agents:
-   - PlannerAgent: Plan generation and iteration
-   - TeacherAgent: All teaching, doubts, motivation, attention questions
-   - QuizAgent: Quiz generation and evaluation
-   
-3. Retrieval is a Tool, Not an Agent
-   - TeacherAgent calls retrieve_context() tool
-   
-4. Simplified Flow:
-   greeting → planning → teaching ←→ quiz → chapter_transition → (repeat or complete)
+Key Design Principle:
+- NO intent detection/classification layer
+- Each agent decides its own next action
+- Agents return BOTH response AND next_phase
+- The LLM IS the router - it understands context naturally
+- This is an AGENTIC platform, not a rule-based chatbot
 
-5. Background Processing:
-   - Summarization happens async after chapter completion
-   - Motivation messages triggered by Temporal for inactivity
+Flow:
+1. User message goes to current phase's agent
+2. Agent processes with full context (including user message)
+3. Agent returns response + decides next phase
+4. No external routing logic needed - agents are autonomous
 """
 
 from typing import Dict, Any, Optional
@@ -27,7 +19,6 @@ from datetime import datetime
 
 from app.langgraph.state import (
     ProfessorState, 
-    Phase, 
     should_trigger_quiz,
     reset_chapter_state,
 )
@@ -37,15 +28,15 @@ logger = get_logger(__name__)
 
 
 # ============================================================================
-# NODE FUNCTIONS
+# AGENT NODES - Each agent handles its phase completely
 # ============================================================================
 
 async def greeting_node(state: ProfessorState) -> Dict[str, Any]:
     """
-    Display greeting and wait for user to accept.
+    GreetingAgent: Welcomes user and offers to create a learning plan.
     
-    Simple template - the greeting was already generated during PDF processing.
-    This node just handles the response when user is ready.
+    This is a simple node - just displays greeting.
+    The PlannerAgent will handle the user's response.
     """
     book_title = state.get("book_title", "your learning material")
     total_chapters = state.get("total_chapters", 0)
@@ -77,104 +68,169 @@ Just say **"Yes"** when you're ready!"""
     }
 
 
-async def planning_node(state: ProfessorState) -> Dict[str, Any]:
+async def config_gathering_node(state: ProfessorState) -> Dict[str, Any]:
     """
-    Generate or iterate learning plan using PlannerAgent.
+    ConfigGatheringAgent: Conversationally gathers user preferences.
     
-    PlannerAgent handles both initial generation and modifications.
+    This agent uses tools to ask the user about:
+    - How many days they want to study
+    - How much time per day
+    - Learning level (beginner/intermediate/advanced)
+    - Quiz frequency
+    - Professor level
+    
+    The agent drives the conversation until all config is gathered,
+    then generates the learning plan.
     """
-    from app.agents.planner import PlannerAgent
-    from app.db.database import async_session_maker
-    from sqlalchemy import select
-    from app.models.book import Book, BookChapter
-    from app.models.learning_config import LearningConfig
-    from datetime import date
-    from uuid import UUID
+    from app.agents.planner import gather_config_conversationally
     
-    api_key = state.get("api_key")
-    book_id = state.get("book_id")
+    book_id = state.get("book_id", "")
+    book_title = state.get("book_title", "")
+    user_id = state.get("user_id", "")
+    total_chapters = state.get("total_chapters", 12)
     user_message = state.get("user_message", "")
-    existing_plan = state.get("plan_data")
-    plan_iteration_count = state.get("plan_iteration_count", 0)
+    # Prefer dedicated config history; fall back to general conversation
+    # history (loaded from ChatMessage records) so the agent has context
+    # even after a Temporal workflow restart.
+    conversation_history = (
+        state.get("config_conversation_history")
+        or state.get("conversation_history", [])
+    )
+    api_key = state.get("api_key", "")
     
-    # Gather book info from database
-    chapter_list = []
-    target_days = 30
-    daily_minutes = state.get("daily_study_minutes", 60)
-    learning_level = state.get("learning_level", "intermediate")
-    book_title = state.get("book_title", "Your Book")
-    total_chapters = state.get("total_chapters", 5)
+    logger.info(
+        "config_gathering_node",
+        book_id=book_id,
+        book_title=book_title,
+        total_chapters=total_chapters,
+        has_api_key=bool(api_key),
+    )
     
-    if book_id:
-        async with async_session_maker() as db:
-            # Get book
-            book_result = await db.execute(
-                select(Book).where(Book.id == UUID(book_id))
-            )
-            book = book_result.scalar_one_or_none()
-            if book:
-                book_title = book.title
-                total_chapters = book.total_chapters or total_chapters
-            
-            # Get chapters
-            chapters_result = await db.execute(
-                select(BookChapter)
-                .where(BookChapter.book_id == UUID(book_id))
-                .order_by(BookChapter.chapter_number)
-            )
-            chapters = chapters_result.scalars().all()
-            chapter_list = [
-                {
-                    "number": c.chapter_number,
-                    "title": c.title or f"Chapter {c.chapter_number}",
-                    "estimated_minutes": c.estimated_duration_minutes or 45,
-                }
-                for c in chapters
-            ]
-            
-            # Get config
-            config_result = await db.execute(
-                select(LearningConfig).where(LearningConfig.book_id == UUID(book_id))
-            )
-            config = config_result.scalar_one_or_none()
-            if config:
-                daily_minutes = config.daily_study_minutes or daily_minutes
-                learning_level = config.learning_level or learning_level
-                if config.deadline:
-                    target_days = max(1, (config.deadline - date.today()).days)
+    # Use the conversational config gathering agent
+    result = await gather_config_conversationally(
+        book_id=book_id,
+        book_title=book_title,
+        user_id=user_id,
+        total_chapters=total_chapters,
+        user_message=user_message,
+        conversation_history=conversation_history,
+        api_key=api_key,
+    )
     
-    if target_days <= 0:
-        target_days = max(total_chapters, 7)
+    response = result.get("response", "")
+    config_complete = result.get("config_complete", False)
+    config = result.get("config")
     
-    # Build agent state
-    agent_state = {
-        "user_id": state.get("user_id"),
-        "active_book_id": book_id,
-        "book_title": book_title,
-        "total_chapters": total_chapters,
-        "professor_level": learning_level,
-        "preferred_study_time_minutes": daily_minutes,
-        "target_days": target_days,
-        "chapters": chapter_list,
-        "api_key": api_key,
-        "learning_plan": existing_plan,
-        "additional_instructions": user_message if plan_iteration_count > 0 else "",
+    # Update conversation history
+    new_history = list(conversation_history)
+    new_history.append({"role": "user", "content": user_message})
+    new_history.append({"role": "assistant", "content": response})
+    
+    response_data = {
+        "professor_response": response,
+        "response_type": "config_gathering",
+        "phase": "config_gathering",
+        "active_agent": "planner",
+        "agent_name": "Professor",
+        "config_conversation_history": new_history,
     }
     
-    # Generate/iterate plan
-    planner = PlannerAgent(api_key=api_key)
-    plan_result = await planner.process(agent_state)
-    learning_plan = plan_result.get("learning_plan", {})
+    # If config is complete, transition to planning
+    if config_complete and config:
+        response_data["phase"] = "planning"
+        response_data["learning_config"] = config
+        response_data["learning_level"] = config.get("learning_level", "intermediate")
+        response_data["professor_level"] = config.get("professor_level", "intermediate")
+        response_data["target_days"] = config.get("target_days", 30)
+        response_data["daily_minutes"] = config.get("daily_minutes", 30)
+        response_data["quiz_frequency"] = config.get("quiz_frequency", "after_each_chapter")
+        
+        logger.info(
+            "config_gathering_complete",
+            config=config,
+        )
     
-    # Format plan summary
-    summary = _format_plan_summary(learning_plan, {
+    return response_data
+
+
+async def planning_node(state: ProfessorState) -> Dict[str, Any]:
+    """
+    PlannerAgent: Generates and iterates on learning plans.
+    
+    This is called AFTER config gathering is complete.
+    The agent:
+    - Creates a plan based on gathered config
+    - Presents the plan to the user
+    - Handles acceptance/rejection/modification
+    """
+    from app.agents.planner import PlannerAgent
+    
+    api_key = state.get("api_key")
+    book_id = state.get("book_id", "")
+    user_id = state.get("user_id", "")
+    book_title = state.get("book_title", "")
+    total_chapters = state.get("total_chapters", 12)
+    chapter_titles = state.get("chapter_titles", [])
+    user_message = state.get("user_message", "")
+    plan_iteration_count = state.get("plan_iteration_count", 0)
+    raw_plan_data = state.get("plan_data")
+    
+    # Get config from state (gathered in config_gathering phase)
+    # Also check learning_plan.pending_config for persisted config
+    pending_config = {}
+    existing_plan = None
+    
+    if raw_plan_data and isinstance(raw_plan_data, dict):
+        pending_config = raw_plan_data.get("pending_config", {})
+        # Only treat as existing plan if it has actual plan data (days array)
+        if raw_plan_data.get("days") and len(raw_plan_data.get("days", [])) > 0:
+            existing_plan = raw_plan_data
+    
+    learning_level = state.get("learning_level") or pending_config.get("learning_level", "intermediate")
+    professor_level = state.get("professor_level") or pending_config.get("professor_level", "intermediate")
+    target_days = state.get("target_days") or pending_config.get("target_days", 30)
+    daily_minutes = state.get("daily_minutes") or pending_config.get("daily_minutes", 30)
+    quiz_frequency = state.get("quiz_frequency") or pending_config.get("quiz_frequency", "after_each_chapter")
+    
+    logger.info(
+        "planning_node_config",
+        target_days=target_days,
+        daily_minutes=daily_minutes,
+        learning_level=learning_level,
+    )
+    
+    planner = PlannerAgent(api_key=api_key)
+    
+    # PlannerAgent handles plan creation and iteration
+    result = await planner.process({
+        "book_id": book_id,
+        "user_id": user_id,
         "book_title": book_title,
-        "daily_study_minutes": daily_minutes,
         "total_chapters": total_chapters,
+        "chapter_titles": chapter_titles,
+        "user_message": user_message,
+        "existing_plan": existing_plan,
+        "iteration_count": plan_iteration_count,
+        "learning_level": learning_level,
+        "professor_level": professor_level,
+        "target_days": target_days,
+        "preferred_study_time_minutes": daily_minutes,
+        "quiz_frequency": quiz_frequency,
     })
     
-    # Add iteration context if this is a modification
-    if plan_iteration_count > 0:
+    learning_plan = result.plan_data
+    summary = result.summary
+    
+    # Check if agent decided the plan is accepted
+    plan_accepted = result.plan_accepted
+    
+    # Check for freemium warning (plan days were capped)
+    freemium_warning = pending_config.get("freemium_warning")
+    
+    if freemium_warning:
+        summary = f"⚠️ {freemium_warning}\n\n{summary}"
+    
+    if plan_iteration_count > 0 and not plan_accepted:
         summary = f"I've adjusted the plan based on your feedback:\n\n{summary}"
     
     logger.info(
@@ -182,100 +238,264 @@ async def planning_node(state: ProfessorState) -> Dict[str, Any]:
         book_id=book_id,
         iteration=plan_iteration_count,
         total_days=learning_plan.get("total_days"),
+        plan_accepted=plan_accepted,
     )
     
-    return {
+    response_data = {
         "plan_data": learning_plan,
         "professor_response": summary,
         "response_type": "plan",
-        "phase": "planning",
+        "phase": "planning",  # Stay in planning until accepted
         "active_agent": "planner",
         "agent_name": "Planner",
         "plan_iteration_count": plan_iteration_count + 1,
+        "professor_level": professor_level,
+        "learning_level": learning_level,
+        "plan_accepted": plan_accepted,
     }
+    
+    # If plan accepted, transition to teaching
+    if plan_accepted:
+        response_data["phase"] = "teaching"
+    
+    return response_data
 
 
 async def teaching_node(state: ProfessorState) -> Dict[str, Any]:
     """
-    TeacherAgent drives the teaching conversation.
+    TeacherAgent: Handles ALL teaching interactions.
     
-    This is the main node where most interaction happens.
-    TeacherAgent handles:
-    - Teaching content
-    - Answering questions/doubts
-    - Motivation (when needed)
-    - Attention questions
-    - Chapter completion detection
+    The agent understands:
+    - Questions about content
+    - Requests to continue/proceed
+    - Requests for examples
+    - Requests to move to next day
+    - Requests for quizzes
+    - Requests for breaks
+    
+    The agent decides the next phase based on its understanding.
+    NO external intent classification needed.
+    
+    SCOPE ENFORCEMENT: Before allowing day/quiz transitions, verifies
+    that the day's scope is complete.
     """
-    from app.agents.teacher import TeacherAgent
-    from app.services.progress import update_study_time, add_topic_covered
+    from app.agents.teacher import teach_with_context, get_chapter_for_day, get_all_chapters_for_day
+    from app.services.scope_service import (
+        extract_scope_from_plan,
+        update_scope_coverage,
+        verify_scope_completion,
+        get_scope_status_for_response,
+        ScopeStatus,
+    )
     import time
     
     start_time = time.time()
     api_key = state.get("api_key")
+    user_message = state.get("user_message", "")
+    current_day = state.get("current_day", 1)
+    plan_data = state.get("plan_data", {})
     
-    # Create TeacherAgent and process
-    teacher = TeacherAgent(api_key=api_key)
-    result = await teacher.process(state)
+    # Get ALL chapters for the current day (a day can span multiple chapters)
+    day_chapters = get_all_chapters_for_day(plan_data, current_day)
+    plan_chapter, plan_chapter_title = get_chapter_for_day(plan_data, current_day)
+    if plan_chapter > 0:
+        actual_chapter = plan_chapter
+        actual_chapter_title = plan_chapter_title
+    else:
+        actual_chapter = state.get("current_chapter", 1)
+        actual_chapter_title = state.get("chapter_title", f"Chapter {actual_chapter}")
     
-    # Calculate time spent on this interaction (estimate ~2 min per exchange)
+    # Build full context for the teacher
+    teacher_state = dict(state)
+    teacher_state["current_chapter"] = actual_chapter
+    teacher_state["chapter_title"] = actual_chapter_title
+    
+    # Tell the teacher about ALL chapters assigned to this day
+    if len(day_chapters) > 1:
+        all_ch_desc = ", ".join([f"Ch {cn}: {ct}" for cn, ct in day_chapters if cn > 0])
+        teacher_state["day_chapters_description"] = all_ch_desc
+        teacher_state["day_chapter_numbers"] = [cn for cn, _ in day_chapters if cn > 0]
+    
+    # Add summaries if available
+    if state.get("previous_day_summary"):
+        teacher_state["previous_day_summary"] = state["previous_day_summary"]
+    if state.get("cumulative_summary"):
+        teacher_state["cumulative_summary"] = state["cumulative_summary"]
+    if state.get("conversation_history"):
+        teacher_state["conversation_history"] = state["conversation_history"]
+    
+    # Inject hint about uncovered topics so teacher prioritizes them
+    scope_for_hint = extract_scope_from_plan(plan_data, current_day)
+    existing_topics = teacher_state.get("topics_covered_this_chapter", [])
+    scope_for_hint = update_scope_coverage(scope_for_hint, existing_topics)
+    uncovered = [t for t in scope_for_hint.remaining_items if t.status != ScopeStatus.COMPLETE]
+    if uncovered:
+        uncovered_names = ', '.join(t.topic_name for t in uncovered)
+        teacher_state["system_hint"] = (
+            f"PRIORITY: {len(uncovered)} topics still uncovered today: {uncovered_names}. "
+            f"Call fetch_next_topic NOW for the first uncovered topic. "
+            f"Do NOT re-explain already covered topics. Move forward."
+        )
+    elif scope_for_hint.total_items > 0:
+        teacher_state["system_hint"] = (
+            f"ALL {scope_for_hint.total_items} topics are covered (100%). "
+            f"You MUST offer a quiz NOW. Do not continue teaching."
+        )
+    
+    # TeacherAgent processes and decides everything
+    result = await teach_with_context(
+        user_message=user_message,
+        state=teacher_state,
+        api_key=api_key,
+    )
+    
     elapsed_seconds = time.time() - start_time
-    study_minutes = max(2, int(elapsed_seconds / 60) + 2)  # At least 2 min per interaction
+    study_minutes = max(2, int(elapsed_seconds / 60) + 2)
     
-    # Update progress
-    # Note: These are utility functions, not agent calls
+    # Track topics covered
     new_topics = list(state.get("topics_covered_this_chapter", []))
     for topic in result.topics_mentioned:
         if topic not in new_topics:
             new_topics.append(topic)
     
-    # Track cumulative study time
     total_study_time = state.get("total_study_time_minutes", 0) + study_minutes
     
-    # Build response
+    # SCOPE VERIFICATION: Check scope completion before transitions
+    scope = extract_scope_from_plan(plan_data, current_day)
+    scope = update_scope_coverage(scope, new_topics)
+    scope_verification = verify_scope_completion(scope, allow_partial=True, minimum_completion=0.95)
+    scope_status = get_scope_status_for_response(scope)
+    
+    # SYSTEM OVERRIDE: Force quiz when scope is sufficiently complete but
+    # the agent chose to keep teaching.  The LLM sometimes ignores the
+    # "offer_quiz" instruction; this hard gate guarantees forward progress.
+    # We use `can_proceed` (≥95%) rather than `is_complete` (strict 100%)
+    # because fuzzy topic matching may leave minor gaps that shouldn't
+    # block quiz transitions.  As a secondary safety net, if we've been
+    # teaching for many messages (≥12) and scope is ≥80%, also force quiz
+    # to prevent infinite teaching loops.
+    effective_next_phase = result.next_phase
+    msg_count = state.get("session_message_count", 0)
+    scope_pct = scope_verification.completion_percentage
+
+    has_real_scope = scope.total_items > 0
+    should_force_quiz = (
+        effective_next_phase == "teaching"
+        and has_real_scope
+        and should_trigger_quiz(state)
+        and (
+            scope_verification.is_complete
+            or scope_verification.can_proceed
+            or (msg_count >= 10 and scope_pct >= 80)
+            or msg_count >= 18  # absolute cap: prevent infinite teaching regardless of scope
+        )
+    )
+    if should_force_quiz:
+        effective_next_phase = "quiz"
+        logger.info(
+            "scope_override_to_quiz",
+            day=current_day,
+            completion=scope_pct,
+            message_count=msg_count,
+            agent_decision=result.next_phase,
+        )
+
+    # Build response using agent's decision (or system override)
     response_data = {
         "professor_response": result.response,
         "response_type": "teaching",
-        "phase": "teaching",
+        "phase": effective_next_phase,
         "active_agent": "teacher",
         "agent_name": "Professor",
         "topics_covered_this_chapter": new_topics,
         "session_message_count": state.get("session_message_count", 0) + 1,
         "total_study_time_minutes": total_study_time,
+        "current_chapter": actual_chapter,
+        "chapter_title": actual_chapter_title,
+        "scope_status": scope_status,
     }
     
-    # Handle attention question tracking
-    if result.asked_attention_question:
-        response_data["last_attention_check_at"] = state.get("session_message_count", 0) + 1
+    # Handle day transition if agent decided
+    if effective_next_phase == "day_transition" or result.day_completed:
+        if not scope_verification.can_proceed:
+            response_data["phase"] = "teaching"
+            response_data["professor_response"] = (
+                result.response + "\n\n" + scope_verification.warning_message
+            )
+            logger.info(
+                "day_transition_blocked_by_scope",
+                day=current_day,
+                completion=scope_verification.completion_percentage,
+                remaining=scope_verification.remaining_topics,
+            )
+        else:
+            if scope_verification.warning_message and not scope_verification.is_complete:
+                response_data["professor_response"] = (
+                    result.response + "\n\n" + scope_verification.warning_message
+                )
+            adv = _advance_day(
+                plan_data, current_day, actual_chapter,
+                state.get("completed_days", []),
+                state.get("completed_chapters", []),
+            )
+            response_data.update(adv)
+        
+        logger.info(
+            "day_transition_by_agent",
+            from_day=current_day,
+            to_day=response_data.get("current_day", current_day),
+            scope_complete=scope_verification.is_complete,
+            scope_completion=scope_verification.completion_percentage,
+        )
     
-    # Handle chapter completion
-    if result.chapter_content_covered:
-        response_data["chapter_content_covered"] = True
-    
-    # Handle quiz readiness
-    if result.ready_for_quiz:
-        # Check if quiz should trigger based on config
-        if should_trigger_quiz(state):
+    # Handle quiz if agent or system override decided
+    if effective_next_phase == "quiz":
+        if not scope_verification.can_proceed:
+            response_data["phase"] = "teaching"
+            response_data["professor_response"] = (
+                result.response + "\n\n" + scope_verification.warning_message
+            )
+            logger.info(
+                "quiz_blocked_by_scope",
+                day=current_day,
+                completion=scope_verification.completion_percentage,
+            )
+        elif should_trigger_quiz(state):
             response_data["phase"] = "quiz"
             response_data["active_agent"] = "quiz"
-        else:
-            # No quiz configured, go to chapter transition
-            response_data["phase"] = "chapter_transition"
+    
+    # Handle break if agent decided
+    if effective_next_phase == "break":
+        response_data["phase"] = "break"
+    
+    logger.info(
+        "teaching_node_complete",
+        agent_decision=result.next_phase,
+        effective_phase=effective_next_phase,
+        rag_used=result.rag_was_used,
+        topics_count=len(result.topics_mentioned),
+        scope_completion=scope_verification.completion_percentage,
+    )
     
     return response_data
 
 
 async def quiz_node(state: ProfessorState) -> Dict[str, Any]:
     """
-    QuizAgent handles the quiz flow.
+    QuizAgent: Handles ALL quiz interactions.
     
-    Flow:
-    1. First entry: Generate questions, show first
-    2. Subsequent: Evaluate answer, show next or complete
-    3. On completion: Show result, handle retry/proceed
+    The agent understands:
+    - Quiz answers (A, B, C, D or free text)
+    - Requests for hints
+    - Requests to skip
+    - Requests to retry
+    - Requests to move on
+    
+    The agent decides the next phase based on its understanding.
+    NO external intent classification needed.
     """
     from app.agents.quiz import QuizAgent
-    from app.services.progress import update_comprehension_score, update_motivation_score
+    from app.agents.teacher import get_chapter_for_day
     
     api_key = state.get("api_key")
     quiz_questions = state.get("quiz_questions", [])
@@ -283,14 +503,21 @@ async def quiz_node(state: ProfessorState) -> Dict[str, Any]:
     quiz_scores = state.get("quiz_scores", [])
     user_message = state.get("user_message", "")
     awaiting_decision = state.get("awaiting_quiz_decision", False)
+    current_day = state.get("current_day", 1)
+    plan_data = state.get("plan_data", {})
+    
+    # Get correct chapter for current day
+    plan_chapter, plan_chapter_title = get_chapter_for_day(plan_data, current_day)
+    current_chapter = plan_chapter if plan_chapter > 0 else state.get("current_chapter", 1)
     
     quiz_agent = QuizAgent(api_key=api_key)
     
-    # Handle retry/proceed decision after failure
+    # If awaiting decision after quiz completion
     if awaiting_decision:
-        user_lower = user_message.lower()
-        if any(word in user_lower for word in ["retry", "again", "try"]) and "move" not in user_lower:
-            # Retry - reset quiz and regenerate
+        # QuizAgent understands retry/skip intent
+        decision = await quiz_agent.understand_post_quiz_decision(user_message)
+        
+        if decision.get("wants_retry", False):
             quiz_result = await quiz_agent.start_quiz(state)
             return {
                 "professor_response": quiz_result.first_question_display,
@@ -303,24 +530,29 @@ async def quiz_node(state: ProfessorState) -> Dict[str, Any]:
                 "quiz_scores": [],
                 "quiz_passed": None,
                 "awaiting_quiz_decision": False,
+                "current_chapter": current_chapter,  # Always include for tracking
             }
         else:
-            # Move on - proceed to chapter transition
-            # Clear quiz state completely
-            return {
-                "professor_response": "No problem! Let's move on to the next chapter. You can always come back to review.",
-                "response_type": "transition",
-                "phase": "chapter_transition",
-                "active_agent": "none",
+            adv = _advance_day(
+                plan_data, current_day, current_chapter,
+                state.get("completed_days", []),
+                state.get("completed_chapters", []),
+            )
+            result_data = {
+                "professor_response": "No problem! Let's move on to the next day. You can always come back to review.",
+                "response_type": "day_transition",
+                "active_agent": "teacher",
                 "agent_name": "Professor",
                 "awaiting_quiz_decision": False,
-                "quiz_questions": [],  # Clear quiz questions
+                "quiz_questions": [],
                 "quiz_scores": [],
                 "quiz_current_index": 0,
                 "quiz_passed": False,
             }
+            result_data.update(adv)
+            return result_data
     
-    # First entry - generate quiz
+    # Start new quiz if no questions yet
     if not quiz_questions:
         quiz_result = await quiz_agent.start_quiz(state)
         return {
@@ -333,17 +565,15 @@ async def quiz_node(state: ProfessorState) -> Dict[str, Any]:
             "quiz_current_index": 0,
             "quiz_scores": [],
             "quiz_passed": None,
+            "current_chapter": current_chapter,  # Always include for tracking
         }
     
-    # Evaluate answer
+    # Evaluate answer - QuizAgent handles everything
     evaluation = await quiz_agent.evaluate_answer(user_message, state)
-    
-    # Update scores
     new_scores = list(quiz_scores) + [evaluation.score]
     new_index = quiz_index + 1
     
     if evaluation.is_quiz_complete:
-        # Quiz complete
         completion = quiz_agent.format_completion_message(
             evaluation.final_score,
             evaluation.passed,
@@ -356,14 +586,23 @@ async def quiz_node(state: ProfessorState) -> Dict[str, Any]:
             "quiz_scores": new_scores,
             "quiz_current_index": new_index,
             "quiz_passed": evaluation.passed,
+            "current_chapter": current_chapter,  # Always include for tracking
         }
         
         if evaluation.passed:
-            response_data["phase"] = "chapter_transition"
             response_data["active_agent"] = "none"
             response_data["awaiting_quiz_decision"] = False
-            # Clear quiz state on pass
             response_data["quiz_questions"] = []
+            
+            adv = _advance_day(
+                plan_data, current_day, current_chapter,
+                state.get("completed_days", []),
+                state.get("completed_chapters", []),
+            )
+            response_data.update(adv)
+            # If not completed, go through chapter transition
+            if response_data.get("phase") != "completed":
+                response_data["phase"] = "chapter_transition"
         else:
             response_data["phase"] = "quiz_feedback"
             response_data["active_agent"] = "quiz"
@@ -371,7 +610,6 @@ async def quiz_node(state: ProfessorState) -> Dict[str, Any]:
         
         return response_data
     else:
-        # More questions
         return {
             "professor_response": f"{evaluation.feedback}\n\n{evaluation.next_question_display}",
             "response_type": "quiz_question",
@@ -380,206 +618,209 @@ async def quiz_node(state: ProfessorState) -> Dict[str, Any]:
             "agent_name": "Quiz Master",
             "quiz_scores": new_scores,
             "quiz_current_index": new_index,
+            "current_chapter": current_chapter,  # Always include for tracking
         }
 
 
 async def chapter_transition_node(state: ProfessorState) -> Dict[str, Any]:
     """
-    Handle chapter completion and transition to next chapter.
+    ChapterTransitionNode: Handles transitions between chapters.
     
-    This node:
-    1. Marks chapter as complete
-    2. Triggers background summarization
-    3. Prepares for next chapter or course completion
+    Provides summary of completed chapter and introduces next chapter.
     """
-    from app.services.progress import (
-        mark_chapter_complete,
-        update_motivation_score,
-        create_progress_snapshot,
+    from app.services.chapter_transition import (
+        generate_chapter_summary,
+        prepare_new_chapter_context,
+        format_chapter_transition_message,
     )
-    from app.services.summarization import trigger_chapter_summarization
-    from app.db.database import async_session_maker
-    from sqlalchemy import select
-    from app.models.book import BookChapter
-    from uuid import UUID
     
+    api_key = state.get("api_key")
     current_chapter = state.get("current_chapter", 1)
-    total_chapters = state.get("total_chapters", 1)
-    chapters_completed = list(state.get("chapters_completed", []))
-    book_id = state.get("book_id")
-    user_id = state.get("user_id")
-    session_id = state.get("session_id")
-    quiz_passed = state.get("quiz_passed")
+    book_id = state.get("book_id", "")
+    user_id = state.get("user_id", "")
+    topics_covered = state.get("topics_covered_this_chapter", [])
     
-    # Mark chapter complete
-    if current_chapter not in chapters_completed:
-        chapters_completed.append(current_chapter)
-    
-    # Trigger background summarization (fire-and-forget)
     try:
-        await trigger_chapter_summarization(
-            user_id=user_id,
+        # Generate summary for completed chapter
+        summary_result = await generate_chapter_summary(
             book_id=book_id,
             chapter_number=current_chapter,
-            session_id=session_id,
+            user_id=user_id,
+            topics_covered=topics_covered,
+            api_key=api_key,
         )
-    except Exception as e:
-        logger.warning(f"Summarization trigger failed: {e}")
-    
-    # Check if course is complete
-    if current_chapter >= total_chapters:
+        
+        # Prepare context for new chapter
+        new_chapter = current_chapter + 1
+        new_context = await prepare_new_chapter_context(
+            book_id=book_id,
+            new_chapter_number=new_chapter,
+            user_id=user_id,
+            api_key=api_key,
+        )
+        
+        # Format transition message
+        message = format_chapter_transition_message(
+            previous_chapter=current_chapter,
+            previous_summary=summary_result.get("summary_text"),
+            new_chapter=new_chapter,
+            new_chapter_title=new_context.get("new_chapter_title", f"Chapter {new_chapter}"),
+            new_chapter_overview=new_context.get("new_chapter_overview"),
+        )
+        
         return {
-            "professor_response": (
-                f"🎓 **Congratulations!**\n\n"
-                f"You've completed all {total_chapters} chapters! "
-                f"This is a fantastic achievement. "
-                f"Would you like to review any chapter or take a final assessment?"
-            ),
-            "response_type": "completion",
-            "phase": "completed",
+            "professor_response": message,
+            "response_type": "chapter_transition",
+            "phase": "awaiting_chapter_start",
             "active_agent": "none",
             "agent_name": "Professor",
-            "chapters_completed": chapters_completed,
+            "current_chapter": new_chapter,
+            "chapter_title": new_context.get("new_chapter_title", f"Chapter {new_chapter}"),
+            "topics_covered_this_chapter": [],
         }
+    except Exception as e:
+        logger.error("chapter_transition_error", error=str(e))
+        return {
+            "professor_response": f"Great work on Chapter {current_chapter}! Ready for Chapter {current_chapter + 1}?",
+            "response_type": "chapter_transition",
+            "phase": "awaiting_chapter_start",
+            "active_agent": "none",
+            "agent_name": "Professor",
+            "current_chapter": current_chapter + 1,
+        }
+
+
+async def start_new_chapter_node(state: ProfessorState) -> Dict[str, Any]:
+    """
+    StartNewChapterNode: Begins teaching a new chapter.
     
-    # Get next chapter info
-    next_chapter = current_chapter + 1
-    next_chapter_title = f"Chapter {next_chapter}"
+    IMPORTANT: This node must fetch actual content from the textbook
+    and start teaching immediately - not just say "let's dive in".
+    """
+    from app.agents.teacher import teach_with_context
     
-    if book_id:
-        try:
-            async with async_session_maker() as db:
-                ch_result = await db.execute(
-                    select(BookChapter.title)
-                    .where(BookChapter.book_id == UUID(book_id))
-                    .where(BookChapter.chapter_number == next_chapter)
-                )
-                ch_row = ch_result.first()
-                if ch_row and ch_row[0]:
-                    next_chapter_title = ch_row[0]
-        except Exception as e:
-            logger.warning(f"Failed to get next chapter title: {e}")
+    current_chapter = state.get("current_chapter", 1)
+    chapter_title = state.get("chapter_title", f"Chapter {current_chapter}")
     
-    # Reset chapter state
-    chapter_reset = reset_chapter_state(state)
+    # Build a teaching state and immediately start teaching
+    # This ensures the first response has actual content
+    teacher_state = dict(state)
+    teacher_state["user_message"] = f"Let's start learning Chapter {current_chapter}: {chapter_title}"
     
-    # Build transition message
-    if quiz_passed:
-        transition_msg = (
-            f"✨ **Great work on Chapter {current_chapter}!**\n\n"
-            f"You've demonstrated solid understanding. "
-            f"Ready for **{next_chapter_title}**?\n\n"
-            f"Say 'yes' when you're ready to continue!"
-        )
-    else:
-        transition_msg = (
-            f"📚 **Moving on from Chapter {current_chapter}**\n\n"
-            f"Let's continue with **{next_chapter_title}**. "
-            f"You can always come back to review.\n\n"
-            f"Say 'yes' when you're ready!"
-        )
+    # Call the teacher agent to get actual content
+    result = await teach_with_context(
+        user_message=teacher_state["user_message"],
+        state=teacher_state,
+        api_key=state.get("api_key"),
+    )
+    
+    # Prepend a chapter start header to the teaching response
+    chapter_intro = f"**Now, let's dive into Chapter {current_chapter}: {chapter_title}**\n\nI'm excited to explore this with you!\n\n---\n\n"
     
     return {
-        **chapter_reset,
-        "professor_response": transition_msg,
-        "response_type": "transition",
-        "phase": "teaching",  # Ready for next chapter
+        "professor_response": chapter_intro + result.response,
+        "response_type": "chapter_start",
+        "phase": "teaching",
         "active_agent": "teacher",
         "agent_name": "Professor",
-        "chapters_completed": chapters_completed,
-        "current_chapter": next_chapter,
-        "chapter_title": next_chapter_title,
+        "topics_covered_this_chapter": result.topics_mentioned,
     }
 
 
 # ============================================================================
-# HELPER FUNCTIONS
+# SCOPE HELPERS - Extract scope from plan_data at runtime
 # ============================================================================
 
-def _format_plan_summary(plan: Dict[str, Any], context: Dict[str, Any]) -> str:
-    """Format learning plan for display."""
-    days = plan.get("days", [])
-    total_days = plan.get("total_days", len(days))
-    overview = plan.get("overview", "")
-    milestones = plan.get("milestones", [])
-    book_title = context.get("book_title", "Your Book")
-    daily_minutes = context.get("daily_study_minutes", 60)
-    total_chapters = context.get("total_chapters", len(days))
+def get_day_scope_from_plan(plan_data: Dict[str, Any], current_day: int) -> Dict[str, Any]:
+    """Extract scope for a specific day from the learning plan."""
+    if not plan_data:
+        return {}
     
-    parts = [f"📚 **Learning Plan for \"{book_title}\"**\n"]
+    days = plan_data.get("days", [])
+    for day in days:
+        if day.get("day") == current_day:
+            return {
+                "day": current_day,
+                "day_title": day.get("day_title", f"Day {current_day}"),
+                "is_rest": day.get("rest", False),
+                "items": day.get("items", []),
+            }
     
-    if overview:
-        parts.append(f"{overview}\n")
-    
-    parts.append(f"**Duration:** {total_days} days")
-    parts.append(f"**Study Time:** {daily_minutes} min/day")
-    parts.append(f"**Chapters:** {total_chapters}\n")
-    
-    if days:
-        parts.append("**Schedule Preview:**")
-        for day in days[:7]:
-            day_num = day.get("day", "?")
-            items = day.get("items", [])
-            if day.get("rest"):
-                parts.append(f"• Day {day_num}: Review & rest")
-                continue
-            if not items:
-                parts.append(f"• Day {day_num}: Catch up")
-                continue
-            
-            chapter_info = []
-            for item in items:
-                ch_title = item.get("chapter_title", "Chapter")
-                ch_num = item.get("chapter_number", "")
-                if ch_num:
-                    chapter_info.append(f"Ch.{ch_num}: {ch_title}")
-                else:
-                    chapter_info.append(ch_title)
-            
-            parts.append(f"• Day {day_num}: {', '.join(chapter_info)}")
-        
-        if len(days) > 7:
-            parts.append(f"• ... and {len(days) - 7} more days")
-    
-    if milestones:
-        parts.append("\n**Key Milestones:**")
-        for milestone in milestones[:3]:
-            name = milestone.get("name", "Milestone")
-            day = milestone.get("day", "?")
-            m_type = milestone.get("type", "checkpoint")
-            emoji = {"checkpoint": "🎯", "quiz": "📝", "completion": "🎓"}.get(m_type, "✓")
-            parts.append(f"• {emoji} Day {day}: {name}")
-    
-    parts.append("\n**Ready to begin?** Just say 'yes' or 'let's start'!")
-    parts.append("Want changes? Tell me what you'd like to adjust.")
-    
-    return "\n".join(parts)
+    return {}
 
 
-def _is_acceptance(message: str) -> bool:
-    """Check if message indicates acceptance."""
-    accept_words = [
-        "yes", "yeah", "yep", "sure", "ok", "okay", "let's", "lets", 
-        "start", "begin", "ready", "go", "continue", "sounds good",
-        "looks good", "perfect", "great", "fine", "accepted"
-    ]
-    message_lower = message.lower().strip()
-    return any(word in message_lower for word in accept_words)
+def _is_rest_day(plan_data: Dict[str, Any], day_number: int) -> bool:
+    """Return True if ``day_number`` is a rest/review day (no teaching items)."""
+    for day in plan_data.get("days", []):
+        if day.get("day") == day_number:
+            return bool(day.get("rest", False)) or not day.get("items")
+    return False
 
 
-def _is_modification_request(message: str) -> bool:
-    """Check if message requests plan modification."""
-    modify_words = [
-        "change", "modify", "adjust", "different", "more time", "less time",
-        "fewer days", "more days", "slower", "faster", "skip", "focus on",
-        "can we", "could we", "what if", "instead"
-    ]
-    message_lower = message.lower().strip()
-    return any(word in message_lower for word in modify_words)
+def _advance_day(
+    plan_data: Dict[str, Any],
+    current_day: int,
+    current_chapter: int,
+    completed_days: list,
+    completed_chapters: list,
+) -> Dict[str, Any]:
+    """Compute the state updates when the current day is finished.
+
+    Handles:
+    * marking the current day as completed
+    * skipping rest/review days
+    * detecting course completion (``next_day > total_days``)
+    * tracking chapter changes
+
+    Returns a dict of state keys to merge into the node's ``response_data``.
+    """
+    from app.agents.teacher import get_chapter_for_day
+
+    updates: Dict[str, Any] = {}
+    new_completed_days = list(completed_days)
+    new_completed_chapters = list(completed_chapters)
+
+    if current_day not in new_completed_days:
+        new_completed_days.append(current_day)
+    updates["completed_days"] = new_completed_days
+    updates["topics_covered_this_chapter"] = []
+
+    next_day = current_day + 1
+    total_days = plan_data.get("total_days", 0)
+
+    # Skip consecutive rest days
+    while next_day <= total_days and _is_rest_day(plan_data, next_day):
+        if next_day not in new_completed_days:
+            new_completed_days.append(next_day)
+        next_day += 1
+
+    if next_day > total_days:
+        # Course finished
+        updates["current_day"] = next_day
+        updates["phase"] = "completed"
+        # Mark the final chapter as completed
+        if current_chapter not in new_completed_chapters:
+            new_completed_chapters.append(current_chapter)
+            updates["completed_chapters"] = new_completed_chapters
+        return updates
+
+    updates["current_day"] = next_day
+
+    next_chapter, next_chapter_title = get_chapter_for_day(plan_data, next_day)
+    if next_chapter > 0:
+        updates["current_chapter"] = next_chapter
+        updates["chapter_title"] = next_chapter_title
+
+        if next_chapter != current_chapter and current_chapter not in new_completed_chapters:
+            new_completed_chapters.append(current_chapter)
+            updates["completed_chapters"] = new_completed_chapters
+
+    updates.setdefault("phase", "teaching")
+    return updates
 
 
 # ============================================================================
-# MAIN MESSAGE PROCESSOR
+# MAIN ENTRY POINT - Simple dispatch to agents
 # ============================================================================
 
 async def process_message(
@@ -592,13 +833,12 @@ async def process_message(
     """
     Process a message using agent-driven orchestration.
     
-    This is the main entry point. It routes to the appropriate
-    agent based on the current phase.
+    This is the main entry point. It simply:
+    1. Determines current phase
+    2. Dispatches to the appropriate agent
+    3. Returns the agent's response
     
-    Key Design:
-    - Agents drive the conversation
-    - Minimal intent classification (only for phase transitions)
-    - State updates come from agent responses
+    NO intent classification - agents handle everything.
     """
     state: ProfessorState = {
         "user_id": user_id,
@@ -611,49 +851,86 @@ async def process_message(
     phase = current_state.get("phase", "greeting")
     logger.info("processing_message", phase=phase, user_id=user_id)
     
+    # Track conversation history
+    conversation_history = list(state.get("conversation_history", []))
+    conversation_history.append({
+        "role": "user",
+        "content": message,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    state["conversation_history"] = conversation_history
+    
     try:
-        # ==================== GREETING PHASE ====================
+        # Simple dispatch to the appropriate agent based on phase
+        # Each agent handles its own decision-making
+        
         if phase == "greeting":
-            if _is_acceptance(message):
-                # User accepted, generate plan
-                result = await planning_node(state)
-            else:
-                # User has question or needs more info
-                result = await greeting_node(state)
+            # First message - go to config gathering
+            result = await config_gathering_node(state)
         
-        # ==================== PLANNING PHASE ====================
+        elif phase == "config_gathering":
+            # ConfigGatheringAgent handles conversational config collection
+            result = await config_gathering_node(state)
+        
         elif phase == "planning":
-            if _is_acceptance(message):
-                # User accepted plan, start teaching
-                state["plan_accepted"] = True
-                state["current_chapter"] = 1
-                result = await teaching_node(state)
-                result["plan_accepted"] = True
-                result["professor_response"] = (
-                    "🎓 **Let's begin your learning journey!**\n\n---\n\n" 
-                    + result.get("professor_response", "")
-                )
-            elif _is_modification_request(message):
-                # User wants to modify plan
-                result = await planning_node(state)
-            else:
-                # Unclear - show plan again or answer question
-                result = await planning_node(state)
+            # PlannerAgent handles plan creation/modification.
+            # Plan acceptance is handled by the dedicated plan review page
+            # (POST /api/planning/review) — NOT in the chat flow.
+            # The frontend redirects to /learn/[id]/plan when it sees
+            # phase == "planning", so the user reviews visually there.
+            result = await planning_node(state)
         
-        # ==================== TEACHING PHASE ====================
         elif phase == "teaching":
-            result = await teaching_node(state)
+            # Auto-advance past rest days before dispatching to teacher
+            plan_data = current_state.get("plan_data", {})
+            cur_day = current_state.get("current_day", 1)
+            if plan_data and _is_rest_day(plan_data, cur_day):
+                adv = _advance_day(
+                    plan_data, cur_day,
+                    current_state.get("current_chapter", 1),
+                    current_state.get("completed_days", []),
+                    current_state.get("completed_chapters", []),
+                )
+                state.update(adv)
+                if adv.get("phase") == "completed":
+                    result = {
+                        "professor_response": (
+                            "🎓 Congratulations! You've completed the entire course! "
+                            "Would you like to review any chapter or discuss what you've learned?"
+                        ),
+                        "response_type": "completion",
+                        "phase": "completed",
+                        "active_agent": "none",
+                        "agent_name": "Professor",
+                        **adv,
+                    }
+                else:
+                    result = await teaching_node(state)
+            else:
+                result = await teaching_node(state)
         
-        # ==================== QUIZ PHASE ====================
         elif phase in ["quiz", "quiz_feedback"]:
+            # QuizAgent handles ALL quiz interactions
             result = await quiz_node(state)
         
-        # ==================== CHAPTER TRANSITION ====================
         elif phase == "chapter_transition":
-            # Always proceed with transition - teacher drives
             result = await chapter_transition_node(state)
         
-        # ==================== COMPLETED ====================
+        elif phase == "awaiting_chapter_start":
+            result = await start_new_chapter_node(state)
+        
+        elif phase == "break":
+            result = {
+                "professor_response": (
+                    "Take your time! When you're ready to continue, just let me know "
+                    "and we'll pick up where we left off. 📚"
+                ),
+                "response_type": "break",
+                "phase": "teaching",
+                "active_agent": "none",
+                "agent_name": "Professor",
+            }
+        
         elif phase == "completed":
             result = {
                 "professor_response": (
@@ -666,12 +943,18 @@ async def process_message(
                 "agent_name": "Professor",
             }
         
-        # ==================== DEFAULT ====================
         else:
+            # Default: TeacherAgent handles it
             result = await teaching_node(state)
-            result["phase"] = "teaching"
         
-        # Build final response
+        # Add response to conversation history
+        conversation_history.append({
+            "role": "assistant",
+            "content": result.get("professor_response", ""),
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        result["conversation_history"] = conversation_history
+        
         return {
             "response": result.get("professor_response", ""),
             "response_type": result.get("response_type", "teaching"),
@@ -684,10 +967,7 @@ async def process_message(
         logger.exception("message_processing_failed", error=str(e), phase=phase)
         
         return {
-            "response": (
-                f"I'm having trouble processing that. "
-                f"Could you try rephrasing? We were working on {phase}."
-            ),
+            "response": "I hit a small snag there. Could you try saying that differently?",
             "response_type": "error",
             "phase": phase,
             "state": state,

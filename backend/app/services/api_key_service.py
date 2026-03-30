@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.logs.logger import get_logger
 from app.models.user import EncryptedAPIKey, User
+from app.models.usage import UserSubscription
 from app.security.encryption import (
     encrypt_api_key,
     decrypt_api_key,
@@ -186,6 +187,9 @@ class APIKeyService:
                 )
                 self.db.add(new_key)
             
+            # Upgrade subscription tier to BYOK
+            await self._upgrade_to_byok(user_id)
+
             await self.db.commit()
             
             logger.info(
@@ -220,13 +224,14 @@ class APIKeyService:
                 delete(EncryptedAPIKey)
                 .where(EncryptedAPIKey.user_id == user_id)
             )
-            await self.db.commit()
             
             deleted = result.rowcount > 0  # type: ignore
             
             if deleted:
+                await self._downgrade_to_free(user_id)
                 logger.info("api_key_deleted", user_id=str(user_id))
             
+            await self.db.commit()
             return deleted
             
         except Exception as e:
@@ -238,6 +243,44 @@ class APIKeyService:
             )
             return False
     
+    async def _upgrade_to_byok(self, user_id: UUID) -> None:
+        """Upgrade user subscription to BYOK tier when they add an API key."""
+        from app.services.freemium_service import TIER_LIMITS
+
+        result = await self.db.execute(
+            select(UserSubscription).where(UserSubscription.user_id == user_id)
+        )
+        subscription = result.scalar_one_or_none()
+
+        if subscription:
+            limits = TIER_LIMITS["byok"]
+            subscription.tier = "byok"
+            subscription.monthly_book_limit = limits["monthly_book_limit"]
+            subscription.max_plan_days = limits["max_plan_days"]
+            subscription.monthly_message_limit = limits["monthly_message_limit"]
+            subscription.monthly_quiz_limit = limits["monthly_quiz_limit"]
+            await self.db.flush()
+            logger.info("subscription_upgraded_to_byok", user_id=str(user_id))
+
+    async def _downgrade_to_free(self, user_id: UUID) -> None:
+        """Downgrade user subscription back to free tier when they remove their API key."""
+        from app.services.freemium_service import TIER_LIMITS
+
+        result = await self.db.execute(
+            select(UserSubscription).where(UserSubscription.user_id == user_id)
+        )
+        subscription = result.scalar_one_or_none()
+
+        if subscription and subscription.tier == "byok":
+            limits = TIER_LIMITS["free"]
+            subscription.tier = "free"
+            subscription.monthly_book_limit = limits["monthly_book_limit"]
+            subscription.max_plan_days = limits["max_plan_days"]
+            subscription.monthly_message_limit = limits["monthly_message_limit"]
+            subscription.monthly_quiz_limit = limits["monthly_quiz_limit"]
+            await self.db.flush()
+            logger.info("subscription_downgraded_to_free", user_id=str(user_id))
+
     async def get_key_status(self, user_id: UUID) -> dict:
         """
         Get the status of a user's API key.

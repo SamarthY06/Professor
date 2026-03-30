@@ -5,12 +5,12 @@ import { BookOpen, Brain, Target, Trophy, ArrowRight, Zap, MessageCircle, BarCha
 
 export default function LandingPage() {
   return (
-    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white">
+    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white dark:from-gray-900 dark:to-gray-900">
       {/* Navigation */}
       <nav className="flex items-center justify-between p-6 max-w-7xl mx-auto">
         <div className="flex items-center gap-2">
           <Brain className="h-8 w-8 text-blue-600" />
-          <span className="text-xl font-bold">Professor</span>
+          <span className="text-xl font-bold text-gray-900 dark:text-gray-100">Professor</span>
         </div>
         <Link
           href="/login"
@@ -22,20 +22,20 @@ export default function LandingPage() {
 
       {/* Hero Section */}
       <section className="max-w-7xl mx-auto px-6 py-24 text-center">
-        <div className="inline-flex items-center gap-2 px-4 py-2 bg-blue-100 border border-blue-200 rounded-full text-blue-700 text-sm mb-8">
+        <div className="inline-flex items-center gap-2 px-4 py-2 bg-blue-100 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-full text-blue-700 dark:text-blue-400 text-sm mb-8">
           <Sparkles className="h-4 w-4" />
           Powered by Agentic OS
         </div>
         
-        <h1 className="text-5xl md:text-6xl font-bold text-gray-900 mb-4">
+        <h1 className="text-5xl md:text-6xl font-bold text-gray-900 dark:text-gray-100 mb-4">
           Meet <span className="text-blue-600">Professor</span>
         </h1>
-        <p className="text-2xl md:text-3xl text-gray-600 mb-8">
+        <p className="text-2xl md:text-3xl text-gray-600 dark:text-gray-300 mb-8">
           Your AI Teacher. Powered by Multi-Agent Intelligence.
         </p>
         
-        <p className="text-lg text-gray-600 max-w-3xl mx-auto mb-12 leading-relaxed">
-          Professor isn't just a chatbot — it's an <span className="font-semibold text-gray-800">Agentic OS</span> where 
+        <p className="text-lg text-gray-600 dark:text-gray-300 max-w-3xl mx-auto mb-12 leading-relaxed">
+          Professor isn't just a chatbot — it's an <span className="font-semibold text-gray-800 dark:text-gray-200">Agentic OS</span> where 
           multiple AI agents work together to teach, quiz, motivate, and adapt to you. 
           Upload any book. Set any goal. Learn chapter by chapter, just like you would with an ordinary professor — 
           except this one never sleeps.
@@ -48,19 +48,19 @@ export default function LandingPage() {
           Start Learning <ArrowRight className="h-5 w-5" />
         </Link>
         
-        <p className="text-gray-500 text-sm mt-4">Free to start • No credit card required</p>
+        <p className="text-gray-500 dark:text-gray-400 text-sm mt-4">Free to start • No credit card required</p>
       </section>
 
       {/* How It Works - Visual Flow */}
-      <section className="bg-white py-20 border-t border-b">
+      <section className="bg-white dark:bg-gray-800 py-20 border-t border-b dark:border-gray-700">
         <div className="max-w-7xl mx-auto px-6">
-          <h2 className="text-3xl font-bold text-center mb-4">How Professor Works</h2>
-          <p className="text-gray-600 text-center mb-16 max-w-2xl mx-auto">
+          <h2 className="text-3xl font-bold text-center mb-4 text-gray-900 dark:text-gray-100">How Professor Works</h2>
+          <p className="text-gray-600 dark:text-gray-300 text-center mb-16 max-w-2xl mx-auto">
             Four simple steps to mastery
           </p>
           <div className="grid md:grid-cols-4 gap-8 relative">
             {/* Connecting line for desktop */}
-            <div className="hidden md:block absolute top-8 left-[12%] right-[12%] h-0.5 bg-blue-100" />
+            <div className="hidden md:block absolute top-8 left-[12%] right-[12%] h-0.5 bg-blue-100 dark:bg-blue-900/30" />
             
             <StepCard 
               number="1" 
@@ -93,8 +93,8 @@ export default function LandingPage() {
       {/* The Agents Section */}
       <section className="py-20">
         <div className="max-w-7xl mx-auto px-6">
-          <h2 className="text-3xl font-bold text-center mb-4">The Agent Swarm</h2>
-          <p className="text-gray-600 text-center mb-12 max-w-2xl mx-auto">
+          <h2 className="text-3xl font-bold text-center mb-4 text-gray-900 dark:text-gray-100">The Agent Swarm</h2>
+          <p className="text-gray-600 dark:text-gray-300 text-center mb-12 max-w-2xl mx-auto">
             Behind Professor is an orchestra of specialized AI agents, each with a unique role
           </p>
           <div className="grid md:grid-cols-3 gap-6">
@@ -117,14 +117,14 @@ export default function LandingPage() {
               color="green"
             />
           </div>
-          <p className="text-center text-gray-500 mt-8">
+          <p className="text-center text-gray-500 dark:text-gray-400 mt-8">
             + Planner, Assessment, Progress, Reminder, and more agents working behind the scenes
           </p>
         </div>
       </section>
 
       {/* Features Strip */}
-      <section className="bg-gray-50 py-16">
+      <section className="bg-gray-50 dark:bg-gray-900 py-16">
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid md:grid-cols-4 gap-6">
             <FeatureItem
@@ -154,10 +154,10 @@ export default function LandingPage() {
       {/* Final CTA */}
       <section className="py-24 text-center">
         <div className="max-w-3xl mx-auto px-6">
-          <h2 className="text-3xl md:text-4xl font-bold mb-4">
+          <h2 className="text-3xl md:text-4xl font-bold mb-4 text-gray-900 dark:text-gray-100">
             Ready to Learn Differently?
           </h2>
-          <p className="text-gray-600 text-lg mb-8">
+          <p className="text-gray-600 dark:text-gray-300 text-lg mb-8">
             Join learners who are mastering new subjects with the power of Agentic AI
           </p>
           <Link
@@ -170,8 +170,8 @@ export default function LandingPage() {
       </section>
 
       {/* Footer */}
-      <footer className="border-t py-8">
-        <div className="max-w-7xl mx-auto px-6 text-center text-gray-500 text-sm">
+      <footer className="border-t dark:border-gray-700 py-8">
+        <div className="max-w-7xl mx-auto px-6 text-center text-gray-500 dark:text-gray-400 text-sm">
           <p>&copy; 2026 Professor. An Agentic OS for Learning.</p>
         </div>
       </footer>
@@ -191,16 +191,16 @@ function AgentCard({
   color: 'blue' | 'purple' | 'green'
 }) {
   const colors = {
-    blue: 'bg-blue-50 border-blue-100 text-blue-600',
-    purple: 'bg-purple-50 border-purple-100 text-purple-600',
-    green: 'bg-green-50 border-green-100 text-green-600',
+    blue: 'bg-blue-50 dark:bg-blue-900/20 border-blue-100 dark:border-blue-800 text-blue-600',
+    purple: 'bg-purple-50 dark:bg-purple-900/20 border-purple-100 dark:border-purple-800 text-purple-600',
+    green: 'bg-green-50 dark:bg-green-900/20 border-green-100 dark:border-green-800 text-green-600',
   }
   
   return (
     <div className={`${colors[color]} border rounded-xl p-6`}>
       <div className="mb-4">{icon}</div>
-      <h3 className="text-lg font-semibold text-gray-900 mb-2">{title}</h3>
-      <p className="text-gray-600 text-sm">{description}</p>
+      <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">{title}</h3>
+      <p className="text-gray-600 dark:text-gray-300 text-sm">{description}</p>
     </div>
   )
 }
@@ -221,8 +221,8 @@ function StepCard({
       <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 text-white rounded-full mb-4 text-xl font-bold relative z-10">
         {number}
       </div>
-      <h3 className="text-xl font-semibold mb-2">{title}</h3>
-      <p className="text-gray-600 text-sm">{description}</p>
+      <h3 className="text-xl font-semibold mb-2 text-gray-900 dark:text-gray-100">{title}</h3>
+      <p className="text-gray-600 dark:text-gray-300 text-sm">{description}</p>
     </div>
   )
 }
@@ -238,10 +238,10 @@ function FeatureItem({
 }) {
   return (
     <div className="flex items-start gap-3">
-      <div className="p-2 bg-blue-100 rounded-lg text-blue-600 flex-shrink-0">{icon}</div>
+      <div className="p-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg text-blue-600 flex-shrink-0">{icon}</div>
       <div>
-        <h4 className="font-semibold text-gray-900">{title}</h4>
-        <p className="text-sm text-gray-600">{description}</p>
+        <h4 className="font-semibold text-gray-900 dark:text-gray-100">{title}</h4>
+        <p className="text-sm text-gray-600 dark:text-gray-300">{description}</p>
       </div>
     </div>
   )

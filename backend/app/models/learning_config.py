@@ -44,6 +44,11 @@ class LearningConfig(Base):
         String(50), nullable=False, default="intermediate"
     )  # beginner, intermediate, advanced, research
     
+    # Professor Level (Teaching Style)
+    professor_level: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="intermediate"
+    )  # undergrad, mtech, phd, intermediate
+    
     # Chapter Selection
     study_all_chapters: Mapped[bool] = mapped_column(Boolean, default=True)
     selected_chapters: Mapped[Optional[List[int]]] = mapped_column(
@@ -133,7 +138,7 @@ class LearningPlan(Base):
     # }
     
     # Human-readable summary
-    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
     # Version tracking (for plan revisions)
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -152,11 +157,10 @@ class LearningPlan(Base):
 
 
 class ConversationState(Base):
-    """
-    Tracks the current state of professor-student conversation.
-    
-    This enables the professor to know where they are in the flow:
-    - greeting → planning → teaching → doubt_resolution → quiz → next_chapter
+    """DEPRECATED: Use LearningState.current_phase instead.
+
+    This table is kept for backwards compatibility / migration safety.
+    All reads now go through LearningState; no code should query this table.
     """
     
     __tablename__ = "conversation_states"

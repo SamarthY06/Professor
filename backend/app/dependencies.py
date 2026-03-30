@@ -64,25 +64,35 @@ async def get_current_user_id(
 ) -> UUID:
     """
     Extract and validate the current user from JWT token.
-    Raises 401 if no valid token is provided.
+
+    Resolution order:
+      1. httpOnly cookie ``professor_access_token`` (preferred, XSS-safe)
+      2. ``Authorization: Bearer <token>`` header (backward compat)
+
+    Raises 401 if no valid token is found.
     """
-    if credentials is None:
+    from app.security.jwt import verify_access_token
+
+    token_value: Optional[str] = request.cookies.get("professor_access_token")
+
+    if not token_value and credentials:
+        token_value = credentials.credentials
+
+    if not token_value:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    from app.security.jwt import verify_access_token
-    
-    payload = verify_access_token(credentials.credentials)
+
+    payload = verify_access_token(token_value)
     if payload is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     user_id = payload.get("sub")
     if user_id is None:
         raise HTTPException(
@@ -90,7 +100,7 @@ async def get_current_user_id(
             detail="Invalid token payload",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     return UUID(user_id)
 
 
@@ -99,23 +109,23 @@ async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Optional[UUID]:
     """
-    Extract user from JWT token if present.
+    Extract user from JWT token if present (cookie → header fallback).
     Returns None if no token is provided (for public endpoints).
     """
-    if credentials is None:
-        return None
-    
     from app.security.jwt import verify_access_token
-    
-    payload = verify_access_token(credentials.credentials)
+
+    token_value: Optional[str] = request.cookies.get("professor_access_token")
+    if not token_value and credentials:
+        token_value = credentials.credentials
+    if not token_value:
+        return None
+
+    payload = verify_access_token(token_value)
     if payload is None:
         return None
-    
+
     user_id = payload.get("sub")
-    if user_id is None:
-        return None
-    
-    return UUID(user_id)
+    return UUID(user_id) if user_id else None
 
 
 async def require_admin(

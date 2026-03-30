@@ -1,4 +1,8 @@
-"""Quiz service - generates and evaluates quizzes with proper scoring."""
+"""
+Quiz service - generates and evaluates quizzes using external RAG service.
+
+This service handles quiz generation and evaluation for the learning flow.
+"""
 
 from typing import Dict, Any, List, Optional
 from uuid import UUID
@@ -15,23 +19,92 @@ from app.models.quiz import QuizAttempt, QuizQuestion
 logger = get_logger(__name__)
 
 
+async def _retrieve_via_external_rag(
+    book_id: str,
+    chapter: int,
+    query: str,
+    user_id: str = "",
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """Retrieve chunks via external RAG service."""
+    from app.integrations.rag_client import get_rag_client, RAGClientError
+    from app.models.book import Book, BookChapter
+    
+    async with async_session_maker() as db:
+        result = await db.execute(
+            select(Book).where(Book.id == UUID(book_id))
+        )
+        book = result.scalar_one_or_none()
+        
+        if not book or not book.book_metadata:
+            return []
+        
+        document_id = book.book_metadata.get("rag_document_id")
+        if not document_id:
+            return []
+        
+        chapter_result = await db.execute(
+            select(BookChapter)
+            .where(BookChapter.book_id == book.id)
+            .where(BookChapter.chapter_number == chapter)
+        )
+        chapter_obj = chapter_result.scalar_one_or_none()
+        
+        chapter_id = None
+        if chapter_obj and chapter_obj.key_concepts:
+            chapter_id = chapter_obj.key_concepts.get("rag_chapter_id")
+    
+    try:
+        client = get_rag_client()
+        
+        if chapter_id:
+            response = await client.search(
+                query=query,
+                document_id=document_id,
+                chapter_ids=[chapter_id],
+                limit=limit,
+                user_id=user_id,
+            )
+        else:
+            response = await client.search(
+                query=query,
+                document_id=document_id,
+                limit=limit,
+                user_id=user_id,
+            )
+        
+        return [
+            {
+                "id": r.chunk_id,
+                "content": r.content,
+                "section_title": r.section_title,
+                "similarity": r.similarity_score,
+            }
+            for r in response.results
+        ]
+        
+    except RAGClientError as e:
+        logger.warning("quiz_rag_search_failed", error=str(e))
+        return []
+    except Exception as e:
+        logger.exception("quiz_rag_error", error=str(e))
+        return []
+
+
 async def generate_quiz(
     book_id: str,
     chapter: int,
     num_questions: int = 5,
     api_key: Optional[str] = None,
+    user_id: str = "",
 ) -> List[Dict[str, Any]]:
-    """Generate quiz questions for a chapter."""
+    """Generate quiz questions for a chapter using external RAG."""
+    chunks = await _retrieve_via_external_rag(book_id, chapter, "key concepts quiz", user_id)
+    context = "\n---\n".join([c.get("content", "")[:400] for c in chunks[:5]])
     
-    from app.rag.retrieval import retrieve_chapter_chunks
+    client = AsyncOpenAI(api_key=api_key or settings.openai_api_key)
     
-    async with async_session_maker() as db:
-        chunks = await retrieve_chapter_chunks(db, book_id, chapter, "key concepts quiz", api_key)
-        context = "\n---\n".join([c.get("content", "")[:400] for c in chunks[:5]])
-        
-        client = AsyncOpenAI(api_key=api_key or settings.openai_api_key)
-        
-        prompt = f"""Based on this content, generate {num_questions} quiz questions.
+    prompt = f"""Based on this content, generate {num_questions} quiz questions.
 
 Content:
 {context}
@@ -39,31 +112,31 @@ Content:
 Return JSON array:
 [{{"question": "...", "answer": "...", "explanation": "..."}}]"""
 
-        try:
-            response = await client.chat.completions.create(
-                model=settings.openai_model,
-                messages=[
-                    {"role": "system", "content": "Generate educational quiz questions. Return valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=800,
-                temperature=0.7,
-                response_format={"type": "json_object"},
-            )
-            
-            result = json.loads(response.choices[0].message.content)
-            questions = result.get("questions", result) if isinstance(result, dict) else result
-            
-            if isinstance(questions, list):
-                return questions[:num_questions]
-                
-        except Exception as e:
-            logger.exception("quiz_generation_failed", error=str(e))
+    try:
+        response = await client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": "Generate educational quiz questions. Return valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=800,
+            temperature=0.7,
+            response_format={"type": "json_object"},
+        )
         
-        return [
-            {"question": f"What is the main concept of Chapter {chapter}?", "answer": "Various concepts", "explanation": "Review the chapter."},
-            {"question": "How does this relate to previous chapters?", "answer": "Builds upon foundations", "explanation": "Connections exist."},
-        ]
+        result = json.loads(response.choices[0].message.content)
+        questions = result.get("questions", result) if isinstance(result, dict) else result
+        
+        if isinstance(questions, list):
+            return questions[:num_questions]
+            
+    except Exception as e:
+        logger.exception("quiz_generation_failed", error=str(e))
+    
+    return [
+        {"question": f"What is the main concept of Chapter {chapter}?", "answer": "Various concepts", "explanation": "Review the chapter."},
+        {"question": "How does this relate to previous chapters?", "answer": "Builds upon foundations", "explanation": "Connections exist."},
+    ]
 
 
 async def evaluate_answer(
@@ -72,7 +145,6 @@ async def evaluate_answer(
     api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate a quiz answer with proper LLM-based validation."""
-    
     client = AsyncOpenAI(api_key=api_key or settings.openai_api_key)
     
     prompt = f"""Evaluate this student's answer fairly:
@@ -118,20 +190,12 @@ async def should_trigger_quiz(
     current_chapter: int,
     chapters_completed: List[int],
 ) -> bool:
-    """
-    Check if quiz should be triggered based on user preferences (Goals.md Section 6).
-    
-    Quiz Trigger Conditions:
-    - after_each_chapter: Quiz after every chapter
-    - after_n_chapters: Quiz after N chapters completed
-    - final_only: Quiz only at the end
-    """
+    """Check if quiz should be triggered based on user preferences."""
     from app.models.learning_config import LearningConfig
     from app.models.book import Book
     
     async with async_session_maker() as db:
         try:
-            # Get learning config
             config_result = await db.execute(
                 select(LearningConfig).where(
                     LearningConfig.book_id == UUID(book_id),
@@ -141,9 +205,8 @@ async def should_trigger_quiz(
             config = config_result.scalar_one_or_none()
             
             if not config:
-                return True  # Default: quiz after each chapter
+                return True
             
-            # Get total chapters
             book_result = await db.execute(
                 select(Book.total_chapters).where(Book.id == UUID(book_id))
             )
@@ -154,15 +217,13 @@ async def should_trigger_quiz(
             
             if quiz_frequency == "after_each_chapter":
                 return True
-            
             elif quiz_frequency == "after_n_chapters":
                 n = config.quiz_after_n_chapters or 2
                 return len(chapters_completed) % n == 0
-            
             elif quiz_frequency == "final_only":
                 return current_chapter >= total_chapters
             
-            return True  # Default
+            return True
             
         except Exception as e:
             logger.exception("quiz_trigger_check_failed", error=str(e))

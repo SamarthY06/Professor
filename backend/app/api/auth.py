@@ -5,17 +5,43 @@ from typing import Optional
 from uuid import UUID
 import bcrypt
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import redis.asyncio as redis_lib
+
 from app.config import settings
 from app.db.database import get_db
-from app.dependencies import get_current_user_id
+from app.dependencies import get_current_user_id, get_redis
 from app.logs.logger import get_logger
 from app.models.user import User, UserAuth, UserSession, UserSettings
 from app.security.jwt import create_access_token, create_refresh_token, verify_refresh_token
+from app.services.email_service import send_verification_code, verify_code
+
+
+def _set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    """Set httpOnly cookies for auth tokens."""
+    is_prod = settings.environment == "production"
+    response.set_cookie(
+        key="professor_access_token",
+        value=access_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="lax",
+        max_age=settings.access_token_expire_minutes * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key="professor_refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="lax",
+        max_age=settings.refresh_token_expire_days * 86400,
+        path="/api/auth/refresh",
+    )
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -66,6 +92,7 @@ class UserResponse(BaseModel):
 @router.post("/google", response_model=TokenResponse)
 async def google_auth(
     request: GoogleAuthRequest,
+    response: Response = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -166,24 +193,37 @@ async def google_auth(
     
     await db.commit()
     
-    # Create JWT tokens
     access_token = create_access_token(str(user_id))
-    refresh_token = create_refresh_token(str(user_id))
+    refresh_tok = create_refresh_token(str(user_id))
+    
+    if response:
+        _set_auth_cookies(response, access_token, refresh_tok)
     
     return TokenResponse(
         access_token=access_token,
-        refresh_token=refresh_token,
+        refresh_token=refresh_tok,
         expires_in=settings.access_token_expire_minutes * 60,
     )
 
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
-    request: RefreshTokenRequest,
+    request_obj: Request,
+    body: RefreshTokenRequest = None,
+    response: Response = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Refresh access token using refresh token."""
-    payload = verify_refresh_token(request.refresh_token)
+    """Refresh access token using refresh token (cookie or body)."""
+    token_value = (
+        request_obj.cookies.get("professor_refresh_token")
+        or (body.refresh_token if body else None)
+    )
+    if not token_value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token provided",
+        )
+    payload = verify_refresh_token(token_value)
     
     if payload is None:
         raise HTTPException(
@@ -203,9 +243,11 @@ async def refresh_token(
             detail="User not found or inactive",
         )
     
-    # Create new tokens
     access_token = create_access_token(user_id)
     new_refresh_token = create_refresh_token(user_id)
+    
+    if response:
+        _set_auth_cookies(response, access_token, new_refresh_token)
     
     return TokenResponse(
         access_token=access_token,
@@ -246,21 +288,56 @@ async def get_current_user(
     )
 
 
-@router.post("/logout")
-async def logout(
-    user_id: UUID = Depends(get_current_user_id),
+class SendVerificationRequest(BaseModel):
+    """Request to send an email verification code."""
+    email: EmailStr
+
+
+class VerifyEmailRequest(BaseModel):
+    """Request to verify the emailed code."""
+    email: EmailStr
+    code: str
+
+
+@router.post("/send-verification")
+async def send_verification(
+    request: SendVerificationRequest,
+    redis: redis_lib.Redis = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
 ):
-    """Logout current user (invalidate sessions)."""
-    # Delete all user sessions
-    await db.execute(
-        UserSession.__table__.delete().where(UserSession.user_id == user_id)
-    )
-    await db.commit()
-    
-    logger.info("user_logged_out", user_id=str(user_id))
-    
-    return {"message": "Logged out successfully"}
+    """Send a 6-digit verification code to the given email."""
+    result = await db.execute(select(User).where(User.email == request.email))
+    if result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email already exists. Please sign in.",
+        )
+
+    success, message = await send_verification_code(request.email, redis)
+    if not success:
+        is_limit = "limit" in message.lower() or "tomorrow" in message.lower()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS if is_limit else status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=message,
+        )
+
+    return {"status": "sent", "message": "Verification code sent to your email."}
+
+
+@router.post("/verify-email")
+async def verify_email_endpoint(
+    request: VerifyEmailRequest,
+    redis: redis_lib.Redis = Depends(get_redis),
+):
+    """Verify the 6-digit code the user received via email."""
+    valid = await verify_code(request.email, request.code, redis)
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification code.",
+        )
+
+    return {"status": "verified", "message": "Email verified successfully."}
 
 
 class SignupRequest(BaseModel):
@@ -269,6 +346,7 @@ class SignupRequest(BaseModel):
     password: str
     name: str
     phone: Optional[str] = None
+    verification_code: Optional[str] = None
     
     @field_validator('password')
     @classmethod
@@ -287,10 +365,13 @@ class SigninRequest(BaseModel):
 @router.post("/signup", response_model=TokenResponse)
 async def signup(
     request: SignupRequest,
+    response: Response = None,
     db: AsyncSession = Depends(get_db),
+    redis: redis_lib.Redis = Depends(get_redis),
 ):
     """
     Register a new user with email and password.
+    Requires a verified email when Resend is configured.
     """
     # Check if user already exists
     result = await db.execute(select(User).where(User.email == request.email))
@@ -301,6 +382,19 @@ async def signup(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An account with this email already exists. Please sign in.",
         )
+
+    if settings.resend_api_key:
+        if not request.verification_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email verification code is required.",
+            )
+        valid = await verify_code(request.email, request.verification_code, redis)
+        if not valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification code. Please request a new one.",
+            )
     
     # Hash password
     password_hash = hash_password(request.password)
@@ -326,13 +420,15 @@ async def signup(
     
     logger.info("user_registered", user_id=str(user.id), email=request.email)
     
-    # Create JWT tokens
     access_token = create_access_token(str(user.id))
-    refresh_token = create_refresh_token(str(user.id))
+    refresh_tok = create_refresh_token(str(user.id))
+    
+    if response:
+        _set_auth_cookies(response, access_token, refresh_tok)
     
     return TokenResponse(
         access_token=access_token,
-        refresh_token=refresh_token,
+        refresh_token=refresh_tok,
         expires_in=settings.access_token_expire_minutes * 60,
     )
 
@@ -340,6 +436,7 @@ async def signup(
 @router.post("/signin", response_model=TokenResponse)
 async def signin(
     request: SigninRequest,
+    response: Response = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -374,11 +471,22 @@ async def signin(
     access_token = create_access_token(str(user.id))
     refresh_token = create_refresh_token(str(user.id))
     
+    if response:
+        _set_auth_cookies(response, access_token, refresh_token)
+    
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=settings.access_token_expire_minutes * 60,
     )
+
+
+@router.post("/logout")
+async def logout(response: Response):
+    """Logout and clear auth cookies."""
+    response.delete_cookie("professor_access_token", path="/")
+    response.delete_cookie("professor_refresh_token", path="/api/auth/refresh")
+    return {"status": "logged_out"}
 
 
 class DevLoginRequest(BaseModel):
@@ -390,6 +498,7 @@ class DevLoginRequest(BaseModel):
 @router.post("/dev-login", response_model=TokenResponse)
 async def dev_login(
     request: DevLoginRequest,
+    response: Response = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -424,12 +533,14 @@ async def dev_login(
     
     await db.commit()
     
-    # Create JWT tokens
     access_token = create_access_token(str(user_id))
-    refresh_token = create_refresh_token(str(user_id))
+    refresh_tok = create_refresh_token(str(user_id))
+    
+    if response:
+        _set_auth_cookies(response, access_token, refresh_tok)
     
     return TokenResponse(
         access_token=access_token,
-        refresh_token=refresh_token,
+        refresh_token=refresh_tok,
         expires_in=settings.access_token_expire_minutes * 60,
     )

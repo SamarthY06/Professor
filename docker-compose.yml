@@ -79,6 +79,8 @@ services:
       dockerfile: Dockerfile.worker
     container_name: professor-temporal-worker
     restart: on-failure:5
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - ./backend/.env
     environment:
@@ -86,6 +88,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - REDIS_HOST=redis
       - TEMPORAL_HOST=temporal:7233
+      - RAG_BASE_URL=http://host.docker.internal:8001
     depends_on:
       postgres:
         condition: service_healthy
@@ -110,6 +113,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: professor-backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - ./backend/.env
     environment:
@@ -120,6 +125,7 @@ services:
       - TEMPORAL_HOST=temporal:7233
       - FRONTEND_URL=http://localhost:3000
       - ENVIRONMENT=development
+      - RAG_BASE_URL=http://host.docker.internal:8001
     depends_on:
       postgres:
         condition: service_healthy
@@ -128,7 +134,7 @@ services:
       temporal:
         condition: service_started
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data/pdfs:/app/data/pdfs
       - ./data/logs:/app/data/logs
@@ -159,7 +165,59 @@ services:
     depends_on:
       - backend
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
+    networks:
+      - professor_network
+
+  # Nginx reverse proxy — edge rate limiting, SSL, and load balancing
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: professor-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+      - web
+    restart: always
+    networks:
+      - professor_network
+
+  # Prometheus metrics collection
+  prometheus:
+    image: prom/prometheus:v2.49.0
+    container_name: professor-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - professor_network
+
+  # Grafana dashboards
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: professor-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-professor_grafana}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
     networks:
       - professor_network
 
@@ -170,3 +228,5 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:

@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from app.agents.base import BaseAgent
 from app.config import settings
 from app.logs.logger import get_logger
+from app.prompts.quiz import (
+    QUIZ_SYSTEM_PROMPT,
+    QUESTION_GENERATION_PROMPT,
+    ANSWER_EVALUATION_PROMPT,
+)
 
 logger = get_logger(__name__)
 
@@ -71,8 +76,6 @@ class QuizAgent(BaseAgent):
     2. evaluate_answer() - Evaluate answer, return next question or completion
     3. If failed: User chooses retry or proceed
     """
-    
-    SYSTEM_PROMPT = """You are a Quiz Generation Specialist. Create clear, fair questions that test understanding, not just memorization. Always respond with valid JSON."""
 
     async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -98,62 +101,6 @@ class QuizAgent(BaseAgent):
                 "evaluation": result,
             }
 
-    QUESTION_GENERATION_PROMPT = """Generate a quiz question for Chapter {chapter_number}: {chapter_title}
-
-**CHAPTER CONTENT:**
-{chapter_content}
-
-**TOPICS TO TEST:**
-{topics}
-
-**QUESTION SPECIFICATIONS:**
-- Type: {question_type}
-- Difficulty: {difficulty}
-- Question {question_number} of {total_questions}
-
-**REQUIREMENTS:**
-1. Test understanding of concepts, not just recall
-2. Be clear and unambiguous
-3. For MCQ: provide 4 distinct options with one clearly correct answer
-4. Include a brief explanation of why the correct answer is right
-
-Return JSON:
-{{
-    "question": "<the question text>",
-    "type": "{question_type}",
-    "difficulty": "{difficulty}",
-    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
-    "correct_answer": "<correct answer or letter>",
-    "explanation": "<why this is correct>",
-    "topic": "<main topic tested>"
-}}"""
-
-    ANSWER_EVALUATION_PROMPT = """Evaluate this quiz answer.
-
-**QUESTION:**
-{question}
-
-**CORRECT ANSWER:**
-{correct_answer}
-
-**EXPLANATION:**
-{explanation}
-
-**STUDENT'S ANSWER:**
-{user_answer}
-
-**EVALUATION RULES:**
-- For MCQ: Check if the letter/option matches
-- For True/False: Check if the answer matches (accept variations like "true", "yes", "T")
-- For Short Answer: Check if the key concepts are present (be fair, partial credit allowed)
-
-Return JSON:
-{{
-    "correct": true/false,
-    "score": 0.0-1.0,
-    "feedback": "<brief, encouraging feedback>"
-}}"""
-
     QUESTION_TYPES = ["mcq", "true_false", "short_answer"]
     QUESTION_TYPE_WEIGHTS = [0.5, 0.25, 0.25]  # 50% MCQ, 25% T/F, 25% short
 
@@ -163,6 +110,10 @@ Return JSON:
     ) -> QuizStartResult:
         """
         Start a new quiz by generating all questions.
+        
+        IMPORTANT: Questions MUST be grounded in textbook content.
+        We fetch fresh content from RAG to ensure questions are based
+        on what's actually in the book, not LLM's general knowledge.
         
         Args:
             state: Current state with chapter info and config
@@ -175,10 +126,28 @@ Return JSON:
         topics_covered = state.get("topics_covered_this_chapter", [])
         comprehension_score = state.get("comprehension_score", 0.7)
         questions_per_quiz = state.get("questions_per_quiz", settings.questions_per_quiz)
-        retrieved_context = state.get("retrieved_context", [])
+        book_id = state.get("book_id", "")
+        user_id = state.get("user_id", "")
         
-        # Format chapter content from retrieved context
-        chapter_content = self._format_chapter_content(retrieved_context)
+        # CRITICAL: Fetch fresh content from RAG for quiz grounding
+        # This ensures questions are based on textbook content, not LLM knowledge
+        chapter_content = await self._fetch_chapter_content_for_quiz(
+            book_id=book_id,
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            topics_covered=topics_covered,
+            user_id=user_id,
+        )
+        
+        if not chapter_content or chapter_content == "No content available":
+            logger.warning(
+                "quiz_no_rag_content",
+                chapter_number=chapter_number,
+                book_id=book_id,
+                message="No RAG content available for quiz - using fallback"
+            )
+            chapter_content = f"Chapter {chapter_number}: {chapter_title}. Topics covered: {', '.join(topics_covered) if topics_covered else 'General content'}"
+        
         topics = ", ".join(topics_covered) if topics_covered else "General chapter content"
         
         # Generate all questions
@@ -218,7 +187,7 @@ Return JSON:
         
         return QuizStartResult(
             questions=questions,
-            first_question_display=f"📝 **Quiz Time!**\n\n{first_question_display}",
+            first_question_display=f"📝 **Let's check your understanding!**\n\nNo pressure - this is just to see what's clicking and what might need another look.\n\n{first_question_display}",
             total_questions=len(questions),
         )
     
@@ -262,12 +231,12 @@ Return JSON:
         next_index = quiz_index + 1
         is_complete = next_index >= questions_per_quiz
         
-        # Build feedback message
+        # Build feedback message - warm and encouraging
         if evaluation["correct"]:
-            feedback_msg = f"✅ **Correct!** {evaluation['feedback']}"
+            feedback_msg = f"✅ **Nice work!** {evaluation['feedback']}"
         else:
             correct_answer = current_question.get("correct_answer", "N/A")
-            feedback_msg = f"❌ **Not quite.** {evaluation['feedback']}\n\n*Correct answer: {correct_answer}*"
+            feedback_msg = f"💭 **Almost there!** {evaluation['feedback']}\n\n*The answer was: {correct_answer}*"
         
         if is_complete:
             # Quiz complete - calculate final score
@@ -318,12 +287,27 @@ Return JSON:
         score_percent = final_score * 100
         
         if passed:
-            message = (
-                f"🎉 **Quiz Complete!**\n\n"
-                f"Your Score: **{score_percent:.0f}%**\n\n"
-                f"Great job! You've demonstrated a solid understanding of this chapter. "
-                f"Let's move on to the next one!"
-            )
+            if score_percent >= 90:
+                message = (
+                    f"🌟 **Fantastic work!**\n\n"
+                    f"You scored **{score_percent:.0f}%** - that's excellent!\n\n"
+                    f"You've really grasped the material. I'm impressed! "
+                    f"Ready to explore what's next?"
+                )
+            elif score_percent >= 80:
+                message = (
+                    f"🎉 **Great job!**\n\n"
+                    f"You scored **{score_percent:.0f}%** - solid understanding!\n\n"
+                    f"You've got a good handle on this chapter. "
+                    f"Let's keep the momentum going!"
+                )
+            else:
+                message = (
+                    f"✅ **You passed!**\n\n"
+                    f"You scored **{score_percent:.0f}%** - nice work!\n\n"
+                    f"You've shown you understand the key concepts. "
+                    f"Ready to continue?"
+                )
             return QuizCompletionResult(
                 passed=True,
                 final_score=final_score,
@@ -332,12 +316,12 @@ Return JSON:
             )
         else:
             message = (
-                f"📊 **Quiz Complete!**\n\n"
-                f"Your Score: **{score_percent:.0f}%** (Passing: {settings.quiz_passing_score * 100:.0f}%)\n\n"
-                f"You're close! Would you like to:\n"
-                f"- **Retry** the quiz with new questions\n"
-                f"- **Move on** to the next chapter (you can always come back)\n\n"
-                f"Just say 'retry' or 'move on'."
+                f"📚 **Quiz finished!**\n\n"
+                f"You scored **{score_percent:.0f}%** (we're looking for {settings.quiz_passing_score * 100:.0f}%)\n\n"
+                f"No worries - this material takes time to sink in! You have two options:\n\n"
+                f"🔄 **Try again** - I'll give you fresh questions to practice with\n"
+                f"➡️ **Move forward** - Continue learning and come back to review later\n\n"
+                f"What feels right to you? Just say 'try again' or 'move on'."
             )
             return QuizCompletionResult(
                 passed=False,
@@ -358,7 +342,7 @@ Return JSON:
         total_questions: int,
     ) -> Dict[str, Any]:
         """Generate a single quiz question."""
-        prompt = self.QUESTION_GENERATION_PROMPT.format(
+        prompt = QUESTION_GENERATION_PROMPT.format(
             chapter_number=chapter_number,
             chapter_title=chapter_title,
             chapter_content=chapter_content[:2000],  # Limit content length
@@ -371,7 +355,7 @@ Return JSON:
         
         question_data = await self.generate_json(
             prompt=prompt,
-            system_prompt=self.SYSTEM_PROMPT,
+            system_prompt=QUIZ_SYSTEM_PROMPT,
             max_tokens=500,
             temperature=0.7,
         )
@@ -384,7 +368,7 @@ Return JSON:
         user_answer: str,
     ) -> Dict[str, Any]:
         """Evaluate a user's answer using LLM."""
-        prompt = self.ANSWER_EVALUATION_PROMPT.format(
+        prompt = ANSWER_EVALUATION_PROMPT.format(
             question=question.get("question", ""),
             correct_answer=question.get("correct_answer", ""),
             explanation=question.get("explanation", ""),
@@ -442,7 +426,7 @@ Return JSON:
         return {
             "correct": correct,
             "score": 1.0 if correct else 0.0,
-            "feedback": "Good answer!" if correct else "Not quite right.",
+            "feedback": "You've got it!" if correct else "That's not quite it, but you're thinking in the right direction.",
         }
     
     def _select_question_type(self) -> str:
@@ -499,6 +483,128 @@ Return JSON:
                 parts.append(content)
         
         return "\n\n".join(parts)
+    
+    async def _fetch_chapter_content_for_quiz(
+        self,
+        book_id: str,
+        chapter_number: int,
+        chapter_title: str,
+        topics_covered: List[str],
+        user_id: str,
+    ) -> str:
+        """
+        Fetch chapter content from RAG for quiz question generation.
+        
+        CRITICAL: This ensures quiz questions are grounded in the actual
+        textbook content, not the LLM's general knowledge.
+        
+        Args:
+            book_id: Book ID
+            chapter_number: Chapter number
+            chapter_title: Chapter title
+            topics_covered: Topics that were covered (to focus questions)
+            user_id: User ID for RAG auth
+        
+        Returns:
+            Formatted chapter content string
+        """
+        from app.integrations.rag_client import get_rag_client
+        from app.db.database import async_session_maker
+        from app.models.book import Book, BookChapter
+        from sqlalchemy import select
+        from uuid import UUID
+        
+        if not book_id:
+            return "No content available"
+        
+        document_id = None
+        chapter_id = None
+        
+        try:
+            async with async_session_maker() as db:
+                book_result = await db.execute(select(Book).where(Book.id == UUID(book_id)))
+                book = book_result.scalar_one_or_none()
+                if book and book.book_metadata:
+                    document_id = book.book_metadata.get("external_document_id") or book.book_metadata.get("rag_document_id")
+                
+                # Get chapter_id for filtering
+                ch_result = await db.execute(
+                    select(BookChapter)
+                    .where(BookChapter.book_id == UUID(book_id))
+                    .where(BookChapter.chapter_number == chapter_number)
+                )
+                chapter = ch_result.scalar_one_or_none()
+                if chapter and chapter.key_concepts:
+                    chapter_id = chapter.key_concepts.get("rag_chapter_id")
+                if chapter and chapter.title:
+                    chapter_title = chapter.title
+        except Exception as e:
+            logger.warning("quiz_db_error", error=str(e))
+            return "No content available"
+        
+        if not document_id:
+            return "No content available"
+        
+        # Build query focused on covered topics
+        topics_str = ", ".join(topics_covered[:5]) if topics_covered else "main concepts"
+        query = (
+            f"STRICTLY from Chapter {chapter_number} titled '{chapter_title}': "
+            f"Provide detailed content about: {topics_str}. "
+            f"Include definitions, formulas, examples, and key concepts from this chapter ONLY."
+        )
+        
+        try:
+            client = get_rag_client()
+            
+            if chapter_id:
+                logger.info(
+                    "quiz_rag_fetch_with_chapter_filter",
+                    chapter_id=chapter_id,
+                    chapter_number=chapter_number,
+                )
+                response = await client.search(
+                    query=query,
+                    document_id=document_id,
+                    chapter_ids=[chapter_id],
+                    limit=8,  # Get more content for quiz
+                    user_id=user_id,
+                )
+            else:
+                logger.warning(
+                    "quiz_rag_fetch_without_chapter_filter",
+                    chapter_number=chapter_number,
+                    message="No chapter_id - quiz may use wrong chapter content"
+                )
+                response = await client.search(
+                    query=query,
+                    document_id=document_id,
+                    limit=8,
+                    user_id=user_id,
+                )
+            
+            if not response.results:
+                return "No content available"
+            
+            # Format content with chapter verification
+            parts = []
+            for r in response.results[:6]:
+                section = r.section_title or "Content"
+                parts.append(f"[Chapter {chapter_number} - {section}]\n{r.content}")
+            
+            content = "\n\n---\n\n".join(parts)
+            
+            logger.info(
+                "quiz_content_fetched",
+                chapter_number=chapter_number,
+                content_length=len(content),
+                chunks_used=len(parts),
+            )
+            
+            return content
+            
+        except Exception as e:
+            logger.exception("quiz_rag_fetch_error", error=str(e))
+            return "No content available"
     
     def _format_question_display(
         self,
@@ -585,3 +691,51 @@ Return JSON:
             passed=passed,
             next_question_display=None,
         )
+    
+    async def understand_post_quiz_decision(self, user_message: str) -> Dict[str, Any]:
+        """
+        Use LLM to understand user's decision after quiz completion.
+        
+        The agent understands natural language like:
+        - "I want to try again" → retry
+        - "Let me retake it" → retry
+        - "Move on" → skip
+        - "Continue to next chapter" → skip
+        - "I'll review later" → skip
+        
+        Returns:
+            Dict with 'wants_retry' and 'wants_skip' booleans
+        """
+        from langchain_openai import ChatOpenAI
+        from langchain_core.prompts import ChatPromptTemplate
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are analyzing a student's response after completing a quiz.
+Determine if they want to:
+1. RETRY the quiz (try again, retake, redo, another attempt)
+2. SKIP/MOVE ON (continue, next chapter, move on, skip, proceed)
+
+Respond with ONLY one word: RETRY or SKIP"""),
+            ("human", "{message}")
+        ])
+        
+        try:
+            llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0,
+                api_key=self.api_key,
+            )
+            
+            chain = prompt | llm
+            result = await chain.ainvoke({"message": user_message})
+            
+            decision = result.content.strip().upper()
+            
+            return {
+                "wants_retry": "RETRY" in decision,
+                "wants_skip": "SKIP" in decision or "RETRY" not in decision,
+            }
+        except Exception as e:
+            logger.error("quiz_decision_understanding_error", error=str(e))
+            # Default to skip on error
+            return {"wants_retry": False, "wants_skip": True}

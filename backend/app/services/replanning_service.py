@@ -19,7 +19,8 @@ from sqlalchemy import select, update
 from app.config import settings
 from app.db.database import async_session_maker
 from app.logs.logger import get_logger
-from app.models.learning_config import LearningConfig, LearningPlan, ConversationState
+from app.models.learning_config import LearningConfig, LearningPlan
+from app.models.learning import LearningState
 from app.models.book import Book, BookChapter
 
 logger = get_logger(__name__)
@@ -49,27 +50,26 @@ async def check_needs_replanning(
             if not config or not config.deadline:
                 return {"needs_replanning": False, "reason": "No deadline set"}
             
-            # Get conversation state
-            conv_result = await db.execute(
-                select(ConversationState).where(
-                    ConversationState.book_id == UUID(book_id),
-                    ConversationState.user_id == UUID(user_id)
+            # Get learning state
+            ls_result = await db.execute(
+                select(LearningState).where(
+                    LearningState.book_id == UUID(book_id),
+                    LearningState.user_id == UUID(user_id)
                 )
             )
-            conv_state = conv_result.scalar_one_or_none()
-            
-            if not conv_state:
-                return {"needs_replanning": False, "reason": "No conversation state"}
-            
-            # Get total chapters
+            ls = ls_result.scalar_one_or_none()
+
+            if not ls:
+                return {"needs_replanning": False, "reason": "No learning state"}
+
             book_result = await db.execute(
                 select(Book.total_chapters).where(Book.id == UUID(book_id))
             )
             book_row = book_result.first()
             total_chapters = book_row[0] if book_row else 5
-            
-            current_chapter = conv_state.current_chapter
-            chapters_completed = len(conv_state.chapters_taught or [])
+
+            current_chapter = ls.current_chapter
+            chapters_completed = len(ls.completed_chapters or [])
             chapters_remaining = total_chapters - chapters_completed
             
             deadline = config.deadline
@@ -120,14 +120,14 @@ async def generate_replan(
     """
     async with async_session_maker() as db:
         try:
-            # Get current state
-            conv_result = await db.execute(
-                select(ConversationState).where(
-                    ConversationState.book_id == UUID(book_id),
-                    ConversationState.user_id == UUID(user_id)
+            # Get learning state
+            ls_result = await db.execute(
+                select(LearningState).where(
+                    LearningState.book_id == UUID(book_id),
+                    LearningState.user_id == UUID(user_id)
                 )
             )
-            conv_state = conv_result.scalar_one_or_none()
+            ls = ls_result.scalar_one_or_none()
             
             # Get learning config
             config_result = await db.execute(
@@ -152,8 +152,8 @@ async def generate_replan(
             )
             chapters = chapters_result.scalars().all()
             
-            current_chapter = conv_state.current_chapter if conv_state else 1
-            chapters_completed = list(conv_state.chapters_taught or []) if conv_state else []
+            current_chapter = ls.current_chapter if ls else 1
+            chapters_completed = list(ls.completed_chapters or []) if ls else []
             total_chapters = len(chapters)
             
             deadline = new_deadline or (config.deadline.isoformat() if config and config.deadline else None)

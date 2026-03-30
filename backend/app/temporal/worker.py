@@ -20,88 +20,80 @@ async def create_worker() -> Worker:
     from app.temporal.client import get_temporal_client
     
     # Import workflows
-    from app.temporal.workflows.reminder import ReminderWorkflow
-    from app.temporal.workflows.quiz_scheduling import QuizSchedulingWorkflow
-    from app.temporal.workflows.missed_session import MissedSessionWorkflow
-    from app.temporal.workflows.learning_session import LearningSessionWorkflow
-    from app.temporal.workflows.inactivity_monitor import InactivityMonitorWorkflow
-    
+    from app.temporal.workflows.document_ingestion import (
+        TrackDocumentIngestionWorkflow,
+        ResumeIngestionTrackingWorkflow,
+    )
+    from app.temporal.workflows.system_monitoring import (
+        PricingSyncWorkflow,
+        ServerMonitoringWorkflow,
+        DailyAggregationWorkflow,
+        ContinuousMonitoringWorkflow,
+    )
+    from app.temporal.workflows.chat_workflow import ChatWorkflow
+
     # Import activities
-    from app.temporal.activities.notifications import (
-        send_email_notification,
-        send_push_notification,
-        send_whatsapp_notification,
+    from app.temporal.activities.teaching import generate_chapter_summary
+    from app.temporal.activities.document_ingestion import (
+        upload_document_to_rag,
+        poll_ingestion_progress,
+        update_book_progress,
+        fetch_and_store_toc,
+        fetch_chapter_summaries,
+        mark_book_ready_for_planning,
+        mark_book_ingestion_failed,
+        trigger_professor_greeting,
+        log_rag_processing_cost,
     )
-    from app.temporal.activities.quiz import (
-        generate_chapter_quiz,
-        process_quiz_results,
+    from app.temporal.activities.pricing_sync import (
+        sync_openai_pricing,
+        collect_server_metrics,
+        store_metrics_snapshot,
+        check_and_alert_health_issues,
+        aggregate_daily_usage,
     )
-    from app.temporal.activities.learning import (
-        unlock_next_chapter,
-        schedule_review_session,
-        update_motivation_score,
-        get_user_learning_state,
-        check_user_inactivity,
-        send_motivation_message,
-    )
-    from app.temporal.activities.teaching import (
-        get_chapter_topics,
-        generate_chapter_introduction,
-        generate_teaching_segment,
-        generate_comprehension_question,
-        evaluate_student_response,
-        generate_chapter_summary,
-    )
-    from app.temporal.activities.session import (
-        send_professor_message,
-        get_pending_student_response,
-        save_session_state,
-        load_session_state,
-        create_learning_session,
+    from app.temporal.activities.chat import (
+        load_chat_state,
+        save_chat_state,
+        get_initial_greeting,
+        process_chat_message,
+        generate_day_summary,
+        load_conversation_history,
     )
     
     client = await get_temporal_client()
     
-    # Configure sandbox to pass through ALL modules that use restricted operations
-    # This includes pathlib, pydantic_settings, and our app modules
+    # Sandbox passthrough: only modules actually imported by active workflows.
+    # ChatWorkflow imports activities.chat, activities.teaching (generate_chapter_summary).
+    # DocumentIngestion workflows import activities.document_ingestion.
+    # System monitoring workflows import activities.pricing_sync.
     sandbox_runner = SandboxedWorkflowRunner(
         restrictions=SandboxRestrictions.default.with_passthrough_modules(
-            # Python stdlib
+            # Python stdlib needed by pydantic/config
             "pathlib",
             "os",
             "dotenv",
-            # Pydantic
+            "io",
+            # Pydantic (settings deserialization in workflow init)
             "pydantic",
             "pydantic_settings",
             "pydantic_settings.main",
             "pydantic_settings.sources",
             "pydantic_core",
-            # Our app
+            # App config
             "app",
             "app.config",
-            "app.temporal",
-            "app.temporal.client",
-            "app.temporal.activities",
-            "app.temporal.activities.notifications",
-            "app.temporal.activities.quiz",
-            "app.temporal.activities.learning",
+            "app.config.rag",
+            # Active activity modules
+            "app.temporal.activities.chat",
             "app.temporal.activities.teaching",
-            "app.temporal.activities.session",
-            "app.temporal.workflows",
+            "app.temporal.activities.document_ingestion",
+            "app.temporal.activities.pricing_sync",
+            # Logging
             "app.logs",
             "app.logs.logger",
-            "app.models",
-            "app.db",
-            "app.db.database",
-            "app.services",
-            "app.rag",
-            # External libs
-            "sqlalchemy",
-            "openai",
-            "redis",
+            # External libs used in workflow code
             "structlog",
-            "httpx",
-            "anyio",
         )
     )
     
@@ -109,37 +101,46 @@ async def create_worker() -> Worker:
         client,
         task_queue=settings.temporal_task_queue,
         workflows=[
-            ReminderWorkflow,
-            QuizSchedulingWorkflow,
-            MissedSessionWorkflow,
-            LearningSessionWorkflow,
-            InactivityMonitorWorkflow,
+            ChatWorkflow,
+            TrackDocumentIngestionWorkflow,
+            ResumeIngestionTrackingWorkflow,
+            PricingSyncWorkflow,
+            ServerMonitoringWorkflow,
+            DailyAggregationWorkflow,
+            ContinuousMonitoringWorkflow,
         ],
         activities=[
-            send_email_notification,
-            send_push_notification,
-            send_whatsapp_notification,
-            generate_chapter_quiz,
-            process_quiz_results,
-            unlock_next_chapter,
-            schedule_review_session,
-            update_motivation_score,
-            get_user_learning_state,
-            check_user_inactivity,
-            send_motivation_message,
-            get_chapter_topics,
-            generate_chapter_introduction,
-            generate_teaching_segment,
-            generate_comprehension_question,
-            evaluate_student_response,
+            # Chat (main learning flow via LangGraph)
+            load_chat_state,
+            save_chat_state,
+            get_initial_greeting,
+            process_chat_message,
+            generate_day_summary,
+            load_conversation_history,
+            # Teaching (chapter summary, used by ChatWorkflow)
             generate_chapter_summary,
-            send_professor_message,
-            get_pending_student_response,
-            save_session_state,
-            load_session_state,
-            create_learning_session,
+            # Document Ingestion (External RAG)
+            upload_document_to_rag,
+            poll_ingestion_progress,
+            update_book_progress,
+            fetch_and_store_toc,
+            fetch_chapter_summaries,
+            mark_book_ready_for_planning,
+            mark_book_ingestion_failed,
+            trigger_professor_greeting,
+            log_rag_processing_cost,
+            # System Monitoring & Pricing Sync
+            sync_openai_pricing,
+            collect_server_metrics,
+            store_metrics_snapshot,
+            check_and_alert_health_issues,
+            aggregate_daily_usage,
         ],
         workflow_runner=sandbox_runner,
+        max_concurrent_activities=50,
+        max_concurrent_workflow_tasks=100,
+        max_concurrent_activity_task_polls=5,
+        max_concurrent_workflow_task_polls=5,
     )
     
     logger.info("temporal_worker_created", task_queue=settings.temporal_task_queue)

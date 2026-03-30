@@ -26,11 +26,17 @@ class LearningStateResponse(BaseModel):
     id: UUID
     book_id: Optional[UUID]
     goal_id: Optional[UUID]
+    # Day-based tracking (primary)
+    current_day: int = 1
+    completed_days: List[int] = []
+    # Chapter-based tracking (internal)
     current_chapter: int
     current_section: Optional[str]
     completed_chapters: List[int]
+    # Settings
     strict_mode: bool
     professor_level: str
+    # Metrics
     motivation_score: float
     attention_score: float
     comprehension_score: float
@@ -86,8 +92,10 @@ async def get_learning_state(
             LearningState.user_id == user_id,
             LearningState.book_id == book_id,
         )
+        .order_by(LearningState.created_at.desc())
+        .limit(1)
     )
-    state = result.scalar_one_or_none()
+    state = result.scalars().first()
     
     if state is None:
         raise HTTPException(
@@ -111,8 +119,10 @@ async def update_learning_state(
             LearningState.user_id == user_id,
             LearningState.book_id == book_id,
         )
+        .order_by(LearningState.created_at.desc())
+        .limit(1)
     )
-    state = result.scalar_one_or_none()
+    state = result.scalars().first()
     
     if state is None:
         raise HTTPException(
@@ -153,8 +163,10 @@ async def get_progress(
             LearningState.user_id == user_id,
             LearningState.book_id == book_id,
         )
+        .order_by(LearningState.created_at.desc())
+        .limit(1)
     )
-    state = result.scalar_one_or_none()
+    state = result.scalars().first()
     
     if state is None:
         raise HTTPException(
@@ -203,26 +215,39 @@ async def reset_learning_state(
     user_id: UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """Reset learning state (start over)."""
+    """Comprehensive reset — clears ALL state so the user can start over.
+
+    Resets:
+        - LearningState (progress, topics, quiz, summaries, phase)
+        - ChatSessions + messages (conversation history)
+    """
+    from sqlalchemy import update as sql_update
+
     result = await db.execute(
         select(LearningState).where(
             LearningState.user_id == user_id,
             LearningState.book_id == book_id,
         )
+        .order_by(LearningState.created_at.desc())
+        .limit(1)
     )
-    state = result.scalar_one_or_none()
-    
+    state = result.scalars().first()
+
     if state is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Learning state not found",
         )
-    
-    # Reset state
+
+    # ---- LearningState: reset every mutable field ----
+    state.current_day = 1
     state.current_chapter = 1
     state.current_section = None
+    state.completed_days = []
     state.completed_chapters = []
     state.completed_sections = {}
+    state.plan_start_date = None
+    state.day_topics_covered = []
     state.summarized_past_context = None
     state.last_topic_discussed = None
     state.pending_topics = None
@@ -230,43 +255,116 @@ async def reset_learning_state(
     state.attention_score = 1.0
     state.comprehension_score = 1.0
     state.total_study_time_minutes = 0
+    state.missed_sessions = 0
+    state.last_session_summary = None
     state.quiz_mode = "none"
     state.pending_quiz_questions = None
-    
+    state.current_day_scope_description = None
+    if hasattr(state, "current_phase"):
+        state.current_phase = "teaching"
+    if hasattr(state, "state_version"):
+        state.state_version = 0
+    if hasattr(state, "day_summaries"):
+        state.day_summaries = None
+    if hasattr(state, "chapter_summaries"):
+        state.chapter_summaries = None
+    if hasattr(state, "cumulative_summary"):
+        state.cumulative_summary = None
+
+    # Clear learning_plan via raw SQL (JSONB NULL requires this)
+    await db.execute(
+        sql_update(LearningState)
+        .where(LearningState.id == state.id)
+        .values(learning_plan=None)
+    )
+
+    # ---- ChatSessions: delete for a clean conversation ----
+    sessions_result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.book_id == book_id,
+            ChatSession.user_id == user_id,
+        )
+    )
+    for session in sessions_result.scalars().all():
+        await db.delete(session)
+
     await db.commit()
-    
+
+    # ---- Terminate running Temporal workflow so it doesn't use stale state ----
+    try:
+        from app.temporal.client import get_temporal_client
+        from temporalio.client import WorkflowExecutionStatus
+
+        client = await get_temporal_client()
+        workflow_id = f"chat-{user_id}-{book_id}"
+        handle = client.get_workflow_handle(workflow_id)
+        desc = await handle.describe()
+        if desc.status == WorkflowExecutionStatus.RUNNING:
+            await handle.terminate(reason="Learning state reset by user")
+            logger.info("temporal_workflow_terminated", workflow_id=workflow_id)
+    except Exception as e:
+        logger.warning("temporal_workflow_terminate_skipped", error=str(e))
+
     logger.info("learning_state_reset", user_id=str(user_id), book_id=str(book_id))
-    
+
     return {"message": "Learning state reset successfully"}
 
 
+class DayProgress(BaseModel):
+    """Day progress within a chapter."""
+    day: int
+    title: str
+    is_completed: bool
+    is_current: bool
+    is_rest: bool = False
+
+
+class ChapterProgress(BaseModel):
+    """Chapter progress with nested days."""
+    chapter_number: int
+    title: str
+    is_completed: bool
+    is_current: bool
+    days: List[DayProgress] = []
+
+
 class DetailedProgressResponse(BaseModel):
-    """Detailed progress response with chapter-by-chapter tracking."""
-    # Overall progress
-    completed_chapters: List[int]
-    total_chapters: int
-    completion_percentage: float
-    current_chapter: int
+    """Detailed progress response with chapter->day hierarchy for sidebar."""
+    # Current position
+    current_day: int = 1
+    current_chapter: int = 1
+    
+    # Completion tracking
+    completed_days: List[int] = []
+    completed_chapters: List[int] = []
+    total_days: int = 1
+    total_chapters: int = 1
+    
+    # Percentages
+    day_completion_percentage: float = 0.0
+    chapter_completion_percentage: float = 0.0
+    
+    # Sidebar data: Chapters with nested days
+    sidebar_chapters: List[ChapterProgress] = []
     
     # Time tracking
-    total_study_time_minutes: int
-    avg_time_per_chapter: float
+    total_study_time_minutes: int = 0
     
     # Performance metrics
-    quiz_pass_rate: float
-    avg_attention_score: float
-    avg_comprehension_score: float
-    motivation_score: float
-    
-    # Chapter details
-    chapter_summaries: List[dict]
+    quiz_pass_rate: float = 0.0
+    motivation_score: float = 100.0
     
     # Current phase
-    current_phase: str
+    current_phase: str = "greeting"
+    
+    # Intra-day scope progress
+    scope_completion_percentage: float = 0.0
+    scope_remaining_topics: List[str] = []
+    scope_total_topics: int = 0
+    scope_covered_topics: int = 0
     
     # Plan info
     plan_data: Optional[dict] = None
-    estimated_completion_date: Optional[str] = None
 
 
 @router.get("/progress/{book_id}/detailed", response_model=DetailedProgressResponse)
@@ -276,27 +374,23 @@ async def get_detailed_progress(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Get detailed progress with chapter-by-chapter tracking.
+    Get detailed progress with chapter->day hierarchy for sidebar.
     
-    Includes:
-    - Per-chapter completion status
-    - Time spent on each chapter
-    - Quiz scores per chapter
-    - Overall metrics
-    - Current learning phase
+    Structure: Chapters contain nested days based on the learning plan.
     """
     from app.models.book import Book, BookChapter
     from app.models.quiz import QuizAttempt
-    from app.models.learning_config import ConversationState, LearningConfig
+    from app.models.learning_config import LearningConfig
     
-    # Get learning state
     result = await db.execute(
         select(LearningState).where(
             LearningState.user_id == user_id,
             LearningState.book_id == book_id,
         )
+        .order_by(LearningState.created_at.desc())
+        .limit(1)
     )
-    state = result.scalar_one_or_none()
+    state = result.scalars().first()
     
     if state is None:
         raise HTTPException(
@@ -304,14 +398,10 @@ async def get_detailed_progress(
             detail="Learning state not found",
         )
     
-    # Get book with chapters
-    result = await db.execute(
-        select(Book).where(Book.id == book_id)
-    )
+    result = await db.execute(select(Book).where(Book.id == book_id))
     book = result.scalar_one_or_none()
     total_chapters = book.total_chapters or 1
     
-    # Get chapters
     chapters_result = await db.execute(
         select(BookChapter)
         .where(BookChapter.book_id == book_id)
@@ -319,22 +409,8 @@ async def get_detailed_progress(
     )
     chapters = chapters_result.scalars().all()
     
-    # Get conversation state for current phase
-    conv_result = await db.execute(
-        select(ConversationState)
-        .where(ConversationState.user_id == user_id)
-        .where(ConversationState.book_id == book_id)
-    )
-    conv_state = conv_result.scalar_one_or_none()
-    current_phase = conv_state.phase if conv_state else "greeting"
+    current_phase = getattr(state, "current_phase", "greeting") or "greeting"
     
-    # Get learning config for plan data
-    config_result = await db.execute(
-        select(LearningConfig).where(LearningConfig.book_id == book_id)
-    )
-    config = config_result.scalar_one_or_none()
-    
-    # Calculate quiz pass rate
     result = await db.execute(
         select(QuizAttempt).where(
             QuizAttempt.user_id == user_id,
@@ -343,54 +419,109 @@ async def get_detailed_progress(
         )
     )
     attempts = result.scalars().all()
+    quiz_pass_rate = (sum(1 for a in attempts if a.passed) / len(attempts) * 100) if attempts else 0.0
     
-    quiz_pass_rate = 0.0
-    if attempts:
-        quiz_pass_rate = sum(1 for a in attempts if a.passed) / len(attempts)
+    plan_data = state.learning_plan
+    current_day = getattr(state, 'current_day', 1) or 1
+    current_chapter = state.current_chapter or 1
+    completed_days = list(getattr(state, 'completed_days', []) or [])
+    completed_chapters = list(state.completed_chapters) if state.completed_chapters else []
     
-    # Calculate completion percentage
-    completed_list = list(state.completed_chapters) if state.completed_chapters else []
-    completed_count = len(completed_list)
-    completion_percentage = (completed_count / total_chapters) * 100
+    # Build sidebar structure: chapters with nested days
+    sidebar_chapters: List[ChapterProgress] = []
+    chapter_to_days: dict = {}  # Map chapter_number -> list of days
+    total_days = 1
     
-    # Calculate average time per chapter
-    avg_time = state.total_study_time_minutes / completed_count if completed_count > 0 else 0
+    if plan_data and "days" in plan_data:
+        total_days = plan_data.get("total_days", len(plan_data["days"]))
+        
+        # Track the last chapter seen for rest days
+        last_chapter_seen = 1
+        
+        # Group days by chapter
+        for day_data in plan_data["days"]:
+            day_num = day_data.get("day", 0)
+            is_rest = day_data.get("rest", False)
+            day_title = day_data.get("day_title", f"Day {day_num}")
+            
+            day_progress = DayProgress(
+                day=day_num,
+                title=day_title,
+                is_completed=day_num in completed_days,
+                is_current=day_num == current_day,
+                is_rest=is_rest,
+            )
+            
+            # Get chapters for this day
+            items = day_data.get("items", [])
+            if items:
+                for item in items:
+                    ch_num = item.get("chapter_number")
+                    if ch_num:
+                        last_chapter_seen = ch_num
+                        if ch_num not in chapter_to_days:
+                            chapter_to_days[ch_num] = []
+                        chapter_to_days[ch_num].append(day_progress)
+            else:
+                # Rest/review days go under the last chapter seen
+                if last_chapter_seen not in chapter_to_days:
+                    chapter_to_days[last_chapter_seen] = []
+                chapter_to_days[last_chapter_seen].append(day_progress)
     
-    # Build chapter summaries
-    chapter_summaries = []
+    # Build chapter list with nested days
     for ch in chapters:
-        is_completed = ch.chapter_number in completed_list
-        chapter_summaries.append({
-            "chapter_number": ch.chapter_number,
-            "title": ch.title or f"Chapter {ch.chapter_number}",
-            "is_completed": is_completed,
-            "is_current": ch.chapter_number == state.current_chapter,
-            "summary": ch.summary,
-            "estimated_duration_minutes": ch.estimated_duration_minutes or 45,
-        })
+        ch_num = ch.chapter_number
+        days_for_chapter = chapter_to_days.get(ch_num, [])
+        
+        sidebar_chapters.append(ChapterProgress(
+            chapter_number=ch_num,
+            title=ch.title or f"Chapter {ch_num}",
+            is_completed=ch_num in completed_chapters,
+            is_current=ch_num == current_chapter,
+            days=days_for_chapter,
+        ))
     
-    # Get plan data if available
-    plan_data = None
-    estimated_completion = None
-    if config:
-        if config.deadline:
-            estimated_completion = config.deadline.isoformat()
+    day_pct = (len(completed_days) / total_days * 100) if total_days > 0 else 0
+    chapter_pct = (len(completed_chapters) / total_chapters * 100) if total_chapters > 0 else 0
+    
+    # Compute intra-day scope progress
+    scope_completion_percentage = 0.0
+    scope_remaining_topics: List[str] = []
+    scope_total_topics = 0
+    scope_covered_topics = 0
+    
+    if plan_data:
+        from app.services.scope_service import (
+            extract_scope_from_plan,
+            update_scope_coverage,
+        )
+        scope = extract_scope_from_plan(plan_data, current_day)
+        topics_covered = list(state.pending_topics or [])
+        scope = update_scope_coverage(scope, topics_covered)
+        scope_completion_percentage = scope.completion_percentage
+        scope_remaining_topics = [i.topic_name for i in scope.remaining_items]
+        scope_total_topics = scope.total_items
+        scope_covered_topics = scope.covered_items
     
     return DetailedProgressResponse(
-        completed_chapters=completed_list,
+        current_day=current_day,
+        current_chapter=current_chapter,
+        completed_days=completed_days,
+        completed_chapters=completed_chapters,
+        total_days=total_days,
         total_chapters=total_chapters,
-        completion_percentage=round(completion_percentage, 1),
-        current_chapter=state.current_chapter,
+        day_completion_percentage=round(day_pct, 1),
+        chapter_completion_percentage=round(chapter_pct, 1),
+        sidebar_chapters=sidebar_chapters,
         total_study_time_minutes=state.total_study_time_minutes,
-        avg_time_per_chapter=round(avg_time, 1),
-        quiz_pass_rate=round(quiz_pass_rate * 100, 1),
-        avg_attention_score=round(state.attention_score * 100, 1),
-        avg_comprehension_score=round(state.comprehension_score * 100, 1),
+        quiz_pass_rate=round(quiz_pass_rate, 1),
         motivation_score=round(state.motivation_score * 100, 1),
-        chapter_summaries=chapter_summaries,
         current_phase=current_phase,
+        scope_completion_percentage=round(scope_completion_percentage, 1),
+        scope_remaining_topics=scope_remaining_topics,
+        scope_total_topics=scope_total_topics,
+        scope_covered_topics=scope_covered_topics,
         plan_data=plan_data,
-        estimated_completion_date=estimated_completion,
     )
 
 
@@ -409,8 +540,10 @@ async def advance_chapter(
             LearningState.user_id == user_id,
             LearningState.book_id == book_id,
         )
+        .order_by(LearningState.created_at.desc())
+        .limit(1)
     )
-    state = result.scalar_one_or_none()
+    state = result.scalars().first()
     
     if state is None:
         raise HTTPException(
@@ -451,360 +584,3 @@ async def advance_chapter(
     return {"message": f"Advanced to chapter {state.current_chapter}"}
 
 
-# ============================================================================
-# PROFESSOR-DRIVEN LEARNING SESSION API
-# ============================================================================
-
-class StartSessionRequest(BaseModel):
-    """Request to start a learning session."""
-    book_id: UUID
-    target_chapters: int = 5  # How many chapters to cover in this session
-
-
-class StartSessionResponse(BaseModel):
-    """Response after starting a learning session."""
-    session_id: UUID
-    workflow_id: str
-    current_chapter: int
-    message: str
-
-
-class StudentResponseRequest(BaseModel):
-    """Student's response to professor."""
-    session_id: UUID
-    message: str
-
-
-class StudentResponseResponse(BaseModel):
-    """Acknowledgment of student response."""
-    success: bool
-    message: str
-
-
-class PendingMessagesResponse(BaseModel):
-    """Response with pending professor messages."""
-    messages: List[dict]
-    has_more: bool
-
-
-@router.post("/session/start", response_model=StartSessionResponse)
-async def start_learning_session(
-    request: StartSessionRequest,
-    user_id: UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-    redis = Depends(get_redis),
-):
-    """
-    Start a new professor-driven learning session.
-    
-    This creates a chat session and starts a Temporal workflow
-    that drives the teaching process.
-    """
-    from app.temporal.client import get_temporal_client
-    from app.temporal.workflows.learning_session import LearningSessionWorkflow
-    from app.config import settings
-    
-    # Check book exists and is ready
-    result = await db.execute(
-        select(Book).where(Book.id == request.book_id)
-    )
-    book = result.scalar_one_or_none()
-    
-    if not book:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found",
-        )
-    
-    if book.processing_status != "completed":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Book is not ready for learning. Status: {book.processing_status}",
-        )
-    
-    # Get or create learning state
-    result = await db.execute(
-        select(LearningState).where(
-            LearningState.user_id == user_id,
-            LearningState.book_id == request.book_id,
-        )
-    )
-    learning_state = result.scalar_one_or_none()
-    
-    if not learning_state:
-        learning_state = LearningState(
-            user_id=user_id,
-            book_id=request.book_id,
-            current_chapter=1,
-            completed_chapters=[],
-        )
-        db.add(learning_state)
-        await db.flush()
-    
-    # Create chat session
-    session = ChatSession(
-        user_id=user_id,
-        learning_state_id=learning_state.id,
-        book_id=request.book_id,
-        chapter_context=learning_state.current_chapter,
-        session_type="learning",
-    )
-    db.add(session)
-    await db.commit()
-    
-    # Generate workflow ID
-    workflow_id = f"learning-{user_id}-{request.book_id}-{session.id}"
-    
-    # Start Temporal workflow
-    try:
-        client = await get_temporal_client()
-        
-        await client.start_workflow(
-            LearningSessionWorkflow.run,
-            args=[
-                str(user_id),
-                str(request.book_id),
-                str(session.id),
-                learning_state.current_chapter,
-                request.target_chapters,
-            ],
-            id=workflow_id,
-            task_queue=settings.temporal_task_queue,
-        )
-        
-        logger.info(
-            "learning_session_started",
-            user_id=str(user_id),
-            book_id=str(request.book_id),
-            session_id=str(session.id),
-            workflow_id=workflow_id,
-        )
-        
-    except Exception as e:
-        logger.exception("failed_to_start_workflow", error=str(e))
-        # Even if workflow fails, we can still use the session for traditional chat
-        workflow_id = "fallback"
-    
-    return StartSessionResponse(
-        session_id=session.id,
-        workflow_id=workflow_id,
-        current_chapter=learning_state.current_chapter,
-        message=f"Learning session started! Professor will begin teaching Chapter {learning_state.current_chapter}.",
-    )
-
-
-@router.post("/session/respond", response_model=StudentResponseResponse)
-async def respond_to_professor(
-    request: StudentResponseRequest,
-    user_id: UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-    redis = Depends(get_redis),
-):
-    """
-    Submit a response to the professor's teaching or questions.
-    
-    This stores the message and signals the Temporal workflow.
-    """
-    from app.temporal.client import get_temporal_client
-    from app.temporal.workflows.learning_session import LearningSessionWorkflow
-    
-    # Verify session belongs to user
-    result = await db.execute(
-        select(ChatSession).where(
-            ChatSession.id == request.session_id,
-            ChatSession.user_id == user_id,
-        )
-    )
-    session = result.scalar_one_or_none()
-    
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found",
-        )
-    
-    # Store the message
-    message = ChatMessage(
-        session_id=session.id,
-        role="user",
-        content=request.message,
-        chapter_at_time=session.chapter_context,
-    )
-    db.add(message)
-    
-    session.message_count += 1
-    session.last_message_at = datetime.utcnow()
-    
-    await db.commit()
-    
-    # Push to Redis for workflow to pick up
-    await redis.lpush(
-        f"session:{session.id}:student_responses",
-        json.dumps({
-            "content": request.message,
-            "timestamp": datetime.utcnow().isoformat(),
-        })
-    )
-    await redis.expire(f"session:{session.id}:student_responses", 3600)
-    
-    # Signal the workflow if it exists
-    try:
-        client = await get_temporal_client()
-        workflow_id = f"learning-{user_id}-{session.book_id}-{session.id}"
-        
-        handle = client.get_workflow_handle(workflow_id)
-        await handle.signal(LearningSessionWorkflow.student_response, request.message)
-        
-        logger.info(
-            "student_response_sent",
-            session_id=str(session.id),
-            workflow_id=workflow_id,
-        )
-        
-    except Exception as e:
-        # Workflow might not exist (using fallback mode)
-        logger.warning("workflow_signal_failed", error=str(e))
-    
-    return StudentResponseResponse(
-        success=True,
-        message="Response received. Professor is processing...",
-    )
-
-
-@router.get("/session/{session_id}/messages", response_model=PendingMessagesResponse)
-async def get_pending_messages(
-    session_id: UUID,
-    user_id: UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-    redis = Depends(get_redis),
-):
-    """
-    Get pending messages from the professor.
-    
-    This is used for polling to receive professor messages.
-    For real-time, use WebSocket subscription.
-    """
-    # Verify session belongs to user
-    result = await db.execute(
-        select(ChatSession).where(
-            ChatSession.id == session_id,
-            ChatSession.user_id == user_id,
-        )
-    )
-    session = result.scalar_one_or_none()
-    
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found",
-        )
-    
-    # Get pending messages from Redis
-    messages = []
-    while True:
-        msg = await redis.rpop(f"session:{session_id}:pending")
-        if not msg:
-            break
-        messages.append(json.loads(msg))
-        if len(messages) >= 10:  # Limit per request
-            break
-    
-    # Check if more messages exist
-    remaining = await redis.llen(f"session:{session_id}:pending")
-    
-    return PendingMessagesResponse(
-        messages=messages,
-        has_more=remaining > 0,
-    )
-
-
-@router.post("/session/{session_id}/pause")
-async def pause_session(
-    session_id: UUID,
-    user_id: UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Pause the current learning session.
-    
-    The session can be resumed later from where it stopped.
-    """
-    from app.temporal.client import get_temporal_client
-    from app.temporal.workflows.learning_session import LearningSessionWorkflow
-    
-    # Verify session
-    result = await db.execute(
-        select(ChatSession).where(
-            ChatSession.id == session_id,
-            ChatSession.user_id == user_id,
-        )
-    )
-    session = result.scalar_one_or_none()
-    
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found",
-        )
-    
-    # Signal the workflow to pause
-    try:
-        client = await get_temporal_client()
-        workflow_id = f"learning-{user_id}-{session.book_id}-{session.id}"
-        
-        handle = client.get_workflow_handle(workflow_id)
-        await handle.signal(LearningSessionWorkflow.pause_session)
-        
-        logger.info("session_paused", session_id=str(session_id))
-        
-    except Exception as e:
-        logger.warning("pause_signal_failed", error=str(e))
-    
-    return {"message": "Session paused. Your progress has been saved."}
-
-
-@router.post("/session/{session_id}/end")
-async def end_session(
-    session_id: UUID,
-    user_id: UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    End the current learning session.
-    """
-    from app.temporal.client import get_temporal_client
-    from app.temporal.workflows.learning_session import LearningSessionWorkflow
-    
-    # Verify session
-    result = await db.execute(
-        select(ChatSession).where(
-            ChatSession.id == session_id,
-            ChatSession.user_id == user_id,
-        )
-    )
-    session = result.scalar_one_or_none()
-    
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found",
-        )
-    
-    # Mark session as inactive
-    session.is_active = False
-    await db.commit()
-    
-    # Signal workflow to end
-    try:
-        client = await get_temporal_client()
-        workflow_id = f"learning-{user_id}-{session.book_id}-{session.id}"
-        
-        handle = client.get_workflow_handle(workflow_id)
-        await handle.signal(LearningSessionWorkflow.end_session)
-        
-    except Exception as e:
-        logger.warning("end_signal_failed", error=str(e))
-    
-    logger.info("session_ended", session_id=str(session_id))
-    
-    return {"message": "Session ended. Your progress has been saved."}

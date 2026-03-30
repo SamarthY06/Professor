@@ -13,11 +13,8 @@ import {
   Loader2,
   AlertCircle,
   CheckCircle2,
-  Clock,
-  Calendar,
-  GraduationCap,
-  BookOpen,
-  ChevronRight,
+  Sparkles,
+  MessageSquare,
 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 import api from '@/lib/api'
@@ -32,13 +29,6 @@ export default function UploadPage() {
   const [isDragging, setIsDragging] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  
-  // NEW: Configuration state (Goals.md Step 1)
-  const [showConfig, setShowConfig] = useState(false)
-  const [learningLevel, setLearningLevel] = useState<'beginner' | 'intermediate' | 'advanced'>('intermediate')
-  const [totalDays, setTotalDays] = useState('30')
-  const [dailyMinutes, setDailyMinutes] = useState('30')
-  const [quizFrequency, setQuizFrequency] = useState<'after_each_chapter' | 'after_n_chapters' | 'final_only'>('after_each_chapter')
   
   // Processing state
   const [uploadedBookId, setUploadedBookId] = useState<string | null>(null)
@@ -98,16 +88,15 @@ export default function UploadPage() {
 
   const startPolling = (bookId: string) => {
     pollingRef.current = setInterval(async () => {
-      if (!token) return
+      if (!isAuthenticated) return
       
       try {
-        const status = await api.books.getStatus(token, bookId)
+        const status = await api.books.getStatus(token || '', bookId)
         setProcessingStatus(status.processing_status)
         setProcessingProgress(status.processing_progress)
         setProcessingStep(status.processing_step || '')
         
         if (status.processing_status === 'completed' || 
-            status.processing_status === 'ready_for_planning' ||
             status.processing_status === 'failed') {
           if (pollingRef.current) {
             clearInterval(pollingRef.current)
@@ -118,9 +107,8 @@ export default function UploadPage() {
             setError(status.processing_error || 'Processing failed')
             setIsUploading(false)
           } else {
-            // Success! Redirect to plan view page
             setTimeout(() => {
-              router.push(`/learn/${bookId}/plan`)
+              router.push(`/learn/${bookId}`)
             }, 1500)
           }
         }
@@ -131,7 +119,7 @@ export default function UploadPage() {
   }
 
   const handleUpload = async () => {
-    if (!file || !token) return
+    if (!file || !isAuthenticated) return
 
     setIsUploading(true)
     setError(null)
@@ -139,18 +127,11 @@ export default function UploadPage() {
     setProcessingStep('Uploading file...')
 
     try {
-      // Upload with configuration
-      const result = await api.books.uploadWithConfig(
-        token,
+      const result = await api.books.upload(
+        token || '',
         file,
         bookTitle || file.name.replace('.pdf', ''),
         bookAuthor || undefined,
-        {
-          learning_level: learningLevel,
-          total_days: parseInt(totalDays),
-          daily_minutes: parseInt(dailyMinutes),
-          quiz_frequency: quizFrequency,
-        }
       )
       
       setUploadedBookId(result.id)
@@ -169,13 +150,13 @@ export default function UploadPage() {
   }
 
   const handleCreateGoal = async () => {
-    if (!goalTitle.trim() || !token) return
+    if (!goalTitle.trim() || !isAuthenticated) return
 
     setIsUploading(true)
     setError(null)
 
     try {
-      await api.goals.create(token, {
+      await api.goals.create(token || '', {
         title: goalTitle,
         description: goalDescription || undefined,
         duration_days: parseInt(goalDuration),
@@ -192,20 +173,20 @@ export default function UploadPage() {
 
   if (authLoading || !isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 dark:from-gray-900 dark:via-gray-900 dark:to-gray-900">
       {/* Header */}
-      <header className="bg-white border-b">
+      <header className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm border-b dark:border-gray-700 sticky top-0 z-10">
         <div className="max-w-3xl mx-auto px-6 py-4">
           <Link
             href="/dashboard"
-            className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900"
+            className="inline-flex items-center gap-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition"
           >
             <ArrowLeft className="h-4 w-4" />
             Back to Dashboard
@@ -215,18 +196,20 @@ export default function UploadPage() {
 
       <main className="max-w-3xl mx-auto px-6 py-12">
         <div className="text-center mb-8">
-          <Brain className="h-12 w-12 text-blue-600 mx-auto mb-4" />
-          <h1 className="text-2xl font-bold text-gray-900 mb-2">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-2xl mb-4 shadow-lg shadow-blue-500/25">
+            <Brain className="h-8 w-8 text-white" />
+          </div>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-2">
             Start Learning Something New
           </h1>
-          <p className="text-gray-600">
-            Upload a book and configure your learning preferences
+          <p className="text-gray-600 dark:text-gray-300">
+            Upload a book and I'll create a personalized learning plan for you
           </p>
         </div>
 
         {/* Error Message */}
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3 text-red-700">
+          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl flex items-center gap-3 text-red-700 dark:text-red-400">
             <AlertCircle className="h-5 w-5 flex-shrink-0" />
             <p>{error}</p>
           </div>
@@ -238,8 +221,8 @@ export default function UploadPage() {
             onClick={() => setActiveTab('book')}
             className={`flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition ${
               activeTab === 'book'
-                ? 'bg-blue-600 text-white'
-                : 'bg-white border text-gray-600 hover:border-blue-200'
+                ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/25'
+                : 'bg-white dark:bg-gray-800 border dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:border-blue-200 dark:hover:border-blue-700 hover:shadow-md'
             }`}
           >
             <FileText className="h-5 w-5" />
@@ -249,8 +232,8 @@ export default function UploadPage() {
             onClick={() => setActiveTab('goal')}
             className={`flex items-center gap-2 px-6 py-3 rounded-xl font-medium transition ${
               activeTab === 'goal'
-                ? 'bg-blue-600 text-white'
-                : 'bg-white border text-gray-600 hover:border-blue-200'
+                ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/25'
+                : 'bg-white dark:bg-gray-800 border dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:border-blue-200 dark:hover:border-blue-700 hover:shadow-md'
             }`}
           >
             <Target className="h-5 w-5" />
@@ -259,10 +242,10 @@ export default function UploadPage() {
         </div>
 
         {/* Content */}
-        <div className="bg-white rounded-2xl border p-8">
+        <div className="bg-white dark:bg-gray-800 rounded-2xl border dark:border-gray-700 shadow-xl dark:shadow-gray-900/50 shadow-gray-200/50 p-8">
           {activeTab === 'book' ? (
             <>
-              {!showConfig ? (
+              {!isUploading ? (
                 <>
                   {/* File Upload */}
                   <div
@@ -272,21 +255,21 @@ export default function UploadPage() {
                     }}
                     onDragLeave={() => setIsDragging(false)}
                     onDrop={handleDrop}
-                    className={`border-2 border-dashed rounded-xl p-12 text-center transition ${
+                    className={`border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-300 ${
                       isDragging
-                        ? 'border-blue-500 bg-blue-50'
+                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 scale-[1.02]'
                         : file
-                        ? 'border-green-500 bg-green-50'
-                        : 'border-gray-200 hover:border-gray-300'
+                        ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
+                        : 'border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-600 hover:bg-gray-50 dark:hover:bg-gray-700'
                     }`}
                   >
                     {file ? (
                       <div className="flex flex-col items-center">
-                        <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mb-4">
-                          <Check className="h-6 w-6 text-green-600" />
+                        <div className="w-16 h-16 bg-green-100 dark:bg-green-900/30 rounded-2xl flex items-center justify-center mb-4">
+                          <Check className="h-8 w-8 text-green-600 dark:text-green-400" />
                         </div>
-                        <p className="font-medium text-gray-900 mb-1">{file.name}</p>
-                        <p className="text-sm text-gray-500 mb-4">
+                        <p className="font-semibold text-gray-900 dark:text-gray-100 mb-1 text-lg">{file.name}</p>
+                        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
                           {(file.size / 1024 / 1024).toFixed(2)} MB
                         </p>
                         <button
@@ -294,15 +277,17 @@ export default function UploadPage() {
                             setFile(null)
                             setBookTitle('')
                           }}
-                          className="text-sm text-red-600 hover:text-red-700"
+                          className="text-sm text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 font-medium"
                         >
                           Remove file
                         </button>
                       </div>
                     ) : (
                       <>
-                        <Upload className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-                        <p className="text-gray-900 font-medium mb-2">
+                        <div className="w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                          <Upload className="h-8 w-8 text-gray-400 dark:text-gray-500" />
+                        </div>
+                        <p className="text-gray-900 dark:text-gray-100 font-medium mb-2 text-lg">
                           Drop your PDF here, or{' '}
                           <label className="text-blue-600 cursor-pointer hover:underline">
                             browse
@@ -314,7 +299,7 @@ export default function UploadPage() {
                             />
                           </label>
                         </p>
-                        <p className="text-sm text-gray-500">
+                        <p className="text-sm text-gray-500 dark:text-gray-400">
                           PDF files only, up to 50MB
                         </p>
                       </>
@@ -325,18 +310,18 @@ export default function UploadPage() {
                   {file && (
                     <div className="mt-8 space-y-4">
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                           Book Title
                         </label>
                         <input
                           type="text"
                           value={bookTitle}
                           onChange={(e) => setBookTitle(e.target.value)}
-                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                          className="w-full px-4 py-3 border dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-400 dark:focus:border-blue-500 outline-none transition text-gray-900 dark:text-gray-100 dark:bg-gray-800"
                         />
                       </div>
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                           Author (optional)
                         </label>
                         <input
@@ -344,171 +329,80 @@ export default function UploadPage() {
                           value={bookAuthor}
                           onChange={(e) => setBookAuthor(e.target.value)}
                           placeholder="Enter author name"
-                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                          className="w-full px-4 py-3 border dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-400 dark:focus:border-blue-500 outline-none transition dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
                         />
                       </div>
                       
-                      {/* Next: Configure Button */}
+                      {/* What happens next info */}
+                      <div className="mt-6 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-xl border border-blue-100 dark:border-blue-800">
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
+                            <MessageSquare className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                          </div>
+                          <div>
+                            <h3 className="font-semibold text-gray-900 dark:text-gray-100 mb-1">What happens next?</h3>
+                            <p className="text-sm text-gray-600 dark:text-gray-300">
+                              After uploading, Professor will chat with you to understand your learning goals, 
+                              available time, and preferences. Then I'll create a personalized day-by-day plan just for you!
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* Upload Button */}
                       <button
-                        onClick={() => setShowConfig(true)}
-                        className="w-full mt-4 px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition flex items-center justify-center gap-2"
+                        onClick={handleUpload}
+                        disabled={!file}
+                        className="w-full mt-4 px-6 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-semibold hover:from-blue-700 hover:to-indigo-700 transition shadow-lg shadow-blue-500/25 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                       >
-                        Next: Configure Learning
-                        <ChevronRight className="h-5 w-5" />
+                        <Sparkles className="h-5 w-5" />
+                        Upload & Start Learning
                       </button>
                     </div>
                   )}
                 </>
               ) : (
                 <>
-                  {/* CONFIGURATION SECTION (Goals.md Step 1) */}
-                  <div className="space-y-6">
-                    <div className="flex items-center gap-3 mb-6">
-                      <button
-                        onClick={() => setShowConfig(false)}
-                        className="text-gray-500 hover:text-gray-700"
-                      >
-                        <ArrowLeft className="h-5 w-5" />
-                      </button>
-                      <div>
-                        <h2 className="text-lg font-semibold text-gray-900">Configure Your Learning</h2>
-                        <p className="text-sm text-gray-500">Set your preferences for "{bookTitle}"</p>
+                  {/* Processing State */}
+                  <div className="text-center py-8">
+                    <div className="w-20 h-20 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-blue-500/25">
+                      {processingProgress === 100 ? (
+                        <CheckCircle2 className="h-10 w-10 text-white" />
+                      ) : (
+                        <Loader2 className="h-10 w-10 text-white animate-spin" />
+                      )}
+                    </div>
+                    
+                    <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+                      {processingProgress === 100 ? 'Processing Complete!' : 'Processing Your Book'}
+                    </h2>
+                    <p className="text-gray-600 dark:text-gray-300 mb-6">
+                      {processingProgress === 100 
+                        ? 'Redirecting you to start your learning journey...'
+                        : processingStep || 'Analyzing content and structure...'}
+                    </p>
+                    
+                    {/* Progress Bar */}
+                    <div className="max-w-md mx-auto">
+                      <div className="flex items-center justify-between text-sm mb-2">
+                        <span className="text-gray-500 dark:text-gray-400">Progress</span>
+                        <span className="font-semibold text-blue-600">{processingProgress}%</span>
                       </div>
-                    </div>
-
-                    {/* Learning Level */}
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-3">
-                        <GraduationCap className="h-4 w-4" />
-                        Your Learning Level
-                      </label>
-                      <div className="grid grid-cols-3 gap-3">
-                        {[
-                          { value: 'beginner', label: 'Beginner', desc: 'New to this topic' },
-                          { value: 'intermediate', label: 'Intermediate', desc: 'Some prior knowledge' },
-                          { value: 'advanced', label: 'Advanced', desc: 'Deep understanding' },
-                        ].map((level) => (
-                          <button
-                            key={level.value}
-                            type="button"
-                            onClick={() => setLearningLevel(level.value as any)}
-                            className={`p-4 border rounded-xl text-left transition ${
-                              learningLevel === level.value
-                                ? 'bg-blue-50 border-blue-500 ring-2 ring-blue-200'
-                                : 'hover:border-blue-300'
-                            }`}
-                          >
-                            <span className="font-medium text-gray-900">{level.label}</span>
-                            <p className="text-xs text-gray-500 mt-1">{level.desc}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Timeline */}
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-3">
-                        <Calendar className="h-4 w-4" />
-                        How many days to complete?
-                      </label>
-                      <select
-                        value={totalDays}
-                        onChange={(e) => setTotalDays(e.target.value)}
-                        className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
-                      >
-                        <option value="7">1 week (7 days)</option>
-                        <option value="14">2 weeks (14 days)</option>
-                        <option value="21">3 weeks (21 days)</option>
-                        <option value="30">1 month (30 days)</option>
-                        <option value="45">45 days</option>
-                        <option value="60">2 months (60 days)</option>
-                        <option value="90">3 months (90 days)</option>
-                      </select>
-                    </div>
-
-                    {/* Daily Study Time */}
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-3">
-                        <Clock className="h-4 w-4" />
-                        Daily study time
-                      </label>
-                      <select
-                        value={dailyMinutes}
-                        onChange={(e) => setDailyMinutes(e.target.value)}
-                        className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
-                      >
-                        <option value="15">15 minutes</option>
-                        <option value="30">30 minutes</option>
-                        <option value="45">45 minutes</option>
-                        <option value="60">1 hour</option>
-                        <option value="90">1.5 hours</option>
-                        <option value="120">2 hours</option>
-                      </select>
-                    </div>
-
-                    {/* Quiz Frequency */}
-                    <div>
-                      <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-3">
-                        <BookOpen className="h-4 w-4" />
-                        Quiz Frequency
-                      </label>
-                      <div className="space-y-2">
-                        {[
-                          { value: 'after_each_chapter', label: 'After every chapter', desc: 'Recommended for deep learning' },
-                          { value: 'after_n_chapters', label: 'After every 2 chapters', desc: 'Balanced approach' },
-                          { value: 'final_only', label: 'Final quiz only', desc: 'Quick completion' },
-                        ].map((freq) => (
-                          <button
-                            key={freq.value}
-                            type="button"
-                            onClick={() => setQuizFrequency(freq.value as any)}
-                            className={`w-full p-4 border rounded-xl text-left transition ${
-                              quizFrequency === freq.value
-                                ? 'bg-blue-50 border-blue-500 ring-2 ring-blue-200'
-                                : 'hover:border-blue-300'
-                            }`}
-                          >
-                            <span className="font-medium text-gray-900">{freq.label}</span>
-                            <p className="text-xs text-gray-500">{freq.desc}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Progress Bar */}
-                  {isUploading && (
-                    <div className="mt-8 space-y-3">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-gray-600">{processingStep || 'Processing...'}</span>
-                        <span className="font-medium text-blue-600">{processingProgress}%</span>
-                      </div>
-                      <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+                      <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-3 overflow-hidden">
                         <div 
-                          className="bg-gradient-to-r from-blue-500 to-blue-600 h-full rounded-full transition-all duration-500 ease-out"
+                          className="bg-gradient-to-r from-blue-500 to-indigo-600 h-full rounded-full transition-all duration-500 ease-out"
                           style={{ width: `${processingProgress}%` }}
                         />
                       </div>
-                      {processingProgress === 100 && (
-                        <div className="flex items-center gap-2 text-green-600 justify-center">
-                          <CheckCircle2 className="h-5 w-5" />
-                          <span className="font-medium">Processing complete! Generating plan...</span>
-                        </div>
-                      )}
                     </div>
-                  )}
-
-                  {/* Upload Button */}
-                  {!isUploading && (
-                    <button
-                      onClick={handleUpload}
-                      disabled={!file || isUploading}
-                      className="w-full mt-8 px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                      <Upload className="h-5 w-5" />
-                      Generate Your Learning Plan
-                    </button>
-                  )}
+                    
+                    {processingProgress === 100 && (
+                      <div className="mt-6 flex items-center justify-center gap-2 text-green-600 dark:text-green-400">
+                        <CheckCircle2 className="h-5 w-5" />
+                        <span className="font-medium">Ready! Taking you to Professor...</span>
+                      </div>
+                    )}
+                  </div>
                 </>
               )}
             </>
@@ -517,7 +411,7 @@ export default function UploadPage() {
               {/* Goal Form */}
               <div className="space-y-6">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     What do you want to learn?
                   </label>
                   <input
@@ -525,12 +419,12 @@ export default function UploadPage() {
                     value={goalTitle}
                     onChange={(e) => setGoalTitle(e.target.value)}
                     placeholder="e.g., Master Python programming, Learn Spanish basics"
-                    className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                    className="w-full px-4 py-3 border dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-400 dark:focus:border-blue-500 outline-none transition dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     Description (optional)
                   </label>
                   <textarea
@@ -538,18 +432,18 @@ export default function UploadPage() {
                     onChange={(e) => setGoalDescription(e.target.value)}
                     placeholder="Tell us more about what you want to achieve..."
                     rows={3}
-                    className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none resize-none"
+                    className="w-full px-4 py-3 border dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-400 dark:focus:border-blue-500 outline-none resize-none transition dark:bg-gray-800 dark:text-gray-100 dark:placeholder-gray-500"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     Learning Duration
                   </label>
                   <select
                     value={goalDuration}
                     onChange={(e) => setGoalDuration(e.target.value)}
-                    className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-100 focus:border-blue-300 outline-none"
+                    className="w-full px-4 py-3 border dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/50 focus:border-blue-400 dark:focus:border-blue-500 outline-none transition dark:bg-gray-800 dark:text-gray-100"
                   >
                     <option value="7">1 week</option>
                     <option value="14">2 weeks</option>
@@ -560,10 +454,10 @@ export default function UploadPage() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
                     Difficulty Level
                   </label>
-                  <div className="flex gap-4">
+                  <div className="flex gap-3">
                     {[
                       { value: 'beginner', label: 'Beginner' },
                       { value: 'intermediate', label: 'Intermediate' },
@@ -573,13 +467,13 @@ export default function UploadPage() {
                         key={level.value}
                         type="button"
                         onClick={() => setGoalDifficulty(level.value)}
-                        className={`flex-1 px-4 py-3 border rounded-lg transition ${
+                        className={`flex-1 px-4 py-3 border dark:border-gray-700 rounded-xl transition font-medium ${
                           goalDifficulty === level.value
-                            ? 'bg-blue-50 border-blue-500 text-blue-700'
-                            : 'hover:border-blue-300'
+                            ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-500 text-blue-700 dark:text-blue-400 ring-2 ring-blue-200 dark:ring-blue-800'
+                            : 'hover:border-blue-300 dark:hover:border-blue-600 text-gray-700 dark:text-gray-200'
                         }`}
                       >
-                        <span className="text-sm font-medium">{level.label}</span>
+                        {level.label}
                       </button>
                     ))}
                   </div>
@@ -590,7 +484,7 @@ export default function UploadPage() {
               <button
                 onClick={handleCreateGoal}
                 disabled={!goalTitle.trim() || isUploading}
-                className="w-full mt-8 px-6 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                className="w-full mt-8 px-6 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-semibold hover:from-blue-700 hover:to-indigo-700 transition shadow-lg shadow-blue-500/25 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {isUploading ? (
                   <>
@@ -609,8 +503,8 @@ export default function UploadPage() {
         </div>
 
         {/* Info */}
-        <p className="text-center text-sm text-gray-500 mt-6">
-          Professor will create a personalized day-by-day learning plan based on your preferences
+        <p className="text-center text-sm text-gray-500 dark:text-gray-400 mt-6">
+          Professor uses AI to create personalized learning experiences tailored to your pace and style
         </p>
       </main>
     </div>

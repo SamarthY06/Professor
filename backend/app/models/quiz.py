@@ -53,10 +53,10 @@ class QuizQuestion(Base):
         UUID(as_uuid=True), ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False, index=True
     )
     book_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("books.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("books.id", ondelete="CASCADE"), nullable=True
     )
     chapter_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("book_chapters.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("book_chapters.id", ondelete="CASCADE"), nullable=True
     )
     
     question_text: Mapped[str] = mapped_column(Text, nullable=False)

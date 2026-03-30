@@ -14,15 +14,17 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 # Simplified phases - agents drive the conversation, not phases
 Phase = Literal[
-    "greeting",           # Initial greeting, waiting for user to accept
-    "planning",           # PlannerAgent generating/iterating plan
-    "teaching",           # TeacherAgent driving the conversation
-    "quiz",               # QuizAgent running quiz loop
-    "quiz_feedback",      # Quiz complete, waiting for retry/proceed decision
-    "chapter_transition", # Moving to next chapter
-    "completed",          # All chapters done
-    "paused",             # User paused the session
-    "error"               # Error state
+    "greeting",              # Initial greeting, waiting for user to accept
+    "config_gathering",      # PlannerAgent gathering user preferences
+    "planning",              # PlannerAgent generating/iterating plan
+    "teaching",              # TeacherAgent driving the conversation
+    "quiz",                  # QuizAgent running quiz loop
+    "quiz_feedback",         # Quiz complete, waiting for retry/proceed decision
+    "chapter_transition",    # Moving to next chapter
+    "awaiting_chapter_start",# Ready to begin the next chapter
+    "completed",             # All chapters done
+    "paused",                # User paused the session
+    "error"                  # Error state
 ]
 
 # Which agent is currently in control
@@ -62,11 +64,16 @@ class ProfessorState(TypedDict, total=False):
     response_type: Literal["greeting", "teaching", "quiz_question", "quiz_result", "plan", "transition", "completion"]
     agent_name: str  # For display: "Professor", "Planner", "Quiz Master"
     
-    # ==================== CHAPTER STATE ====================
+    # ==================== CHAPTER & DAY STATE ====================
     current_chapter: int
     total_chapters: int
-    chapters_completed: List[int]
+    completed_chapters: List[int]
     chapter_title: str
+    # Day-based tracking
+    current_day: int
+    total_days: int
+    completed_days: List[int]
+    day_title: str
     
     # ==================== TEACHING STATE ====================
     # Topics covered in current chapter (for chapter completion detection)
@@ -92,10 +99,11 @@ class ProfessorState(TypedDict, total=False):
     
     # ==================== CONFIG (from LearningConfig) ====================
     learning_level: str          # beginner, intermediate, advanced, research
+    professor_level: str         # undergrad, mtech, phd - teaching style/depth
     daily_study_minutes: int
     quiz_frequency: str          # after_each_chapter, after_n_chapters, final_only
     questions_per_quiz: int
-    professor_style: str         # strict, balanced, encouraging
+    professor_style: str         # strict, balanced, encouraging (deprecated, use professor_level)
     
     # ==================== METRICS ====================
     comprehension_score: float   # 0-1, updated after quizzes
@@ -144,11 +152,15 @@ def create_initial_state(
         response_type="greeting",
         agent_name="Professor",
         
-        # Chapter
+        # Chapter & Day
         current_chapter=1,
         total_chapters=total_chapters,
-        chapters_completed=[],
+        completed_chapters=[],
         chapter_title="",
+        current_day=1,
+        total_days=1,
+        completed_days=[],
+        day_title="",
         
         # Teaching
         topics_covered_this_chapter=[],
@@ -170,6 +182,7 @@ def create_initial_state(
         
         # Config
         learning_level=learning_level,
+        professor_level="intermediate",  # Default, will be set from config
         daily_study_minutes=daily_study_minutes,
         quiz_frequency=quiz_frequency,
         questions_per_quiz=questions_per_quiz,
@@ -200,7 +213,7 @@ def should_trigger_quiz(state: ProfessorState) -> bool:
     quiz_frequency = state.get("quiz_frequency", "after_each_chapter")
     current_chapter = state.get("current_chapter", 1)
     total_chapters = state.get("total_chapters", 1)
-    chapters_completed = state.get("chapters_completed", [])
+    chapters_completed = state.get("completed_chapters", [])
     
     if quiz_frequency == "after_each_chapter":
         return True

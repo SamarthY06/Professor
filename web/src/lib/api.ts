@@ -38,11 +38,20 @@ async function fetchApi<T>(
   const response = await fetch(`${API_URL}${endpoint}`, {
     ...fetchOptions,
     headers,
+    credentials: 'include',
   })
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
-    throw new ApiError(response.status, error.detail || 'Request failed')
+    let message = 'Request failed'
+    if (typeof error.detail === 'string') {
+      message = error.detail
+    } else if (Array.isArray(error.detail)) {
+      message = error.detail.map((d: any) => d.msg || String(d)).join('; ')
+    } else if (error.detail) {
+      message = String(error.detail)
+    }
+    throw new ApiError(response.status, message)
   }
 
   return response.json()
@@ -50,7 +59,19 @@ async function fetchApi<T>(
 
 // Auth endpoints
 export const auth = {
-  signup: (data: { email: string; password: string; name: string; phone?: string }) =>
+  sendVerification: (email: string) =>
+    fetchApi<{ status: string; message: string }>('/api/auth/send-verification', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+
+  verifyEmail: (email: string, code: string) =>
+    fetchApi<{ status: string; message: string }>('/api/auth/verify-email', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    }),
+
+  signup: (data: { email: string; password: string; name: string; phone?: string; verification_code?: string }) =>
     fetchApi<{ access_token: string; refresh_token: string; token_type: string; expires_in: number }>('/api/auth/signup', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -88,6 +109,9 @@ export const auth = {
       role: string
       has_api_key: boolean
     }>('/api/auth/me', { token }),
+
+  logout: () =>
+    fetchApi<{ status: string }>('/api/auth/logout', { method: 'POST' }),
 }
 
 // User endpoints
@@ -211,6 +235,7 @@ export const books = {
         Authorization: `Bearer ${token}`,
       },
       body: formData,
+      credentials: 'include',
     })
 
     if (!response.ok) {
@@ -248,6 +273,7 @@ export const books = {
         Authorization: `Bearer ${token}`,
       },
       body: formData,
+      credentials: 'include',
     })
 
     if (!response.ok) {
@@ -396,12 +422,100 @@ export const chat = {
       method: 'POST',
       token,
     }),
+
+  /**
+   * Send a message via Temporal-backed SSE endpoint.
+   * Returns a promise that resolves with the complete response.
+   * Emits progress events via the optional onProgress callback.
+   */
+  sendV2Stream: (
+    token: string,
+    data: { message: string; book_id: string },
+    onProgress?: (status: string) => void,
+  ): Promise<{
+    message: string
+    phase: string
+    current_chapter: number
+    current_day: number
+    latency_ms: number
+    session_id: string
+  }> => {
+    return new Promise((resolve, reject) => {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => {
+        controller.abort()
+        reject(new ApiError(408, 'Request timed out'))
+      }, 180_000)
+
+      fetch(`${API_URL}/api/chat/v2/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(data),
+        signal: controller.signal,
+        credentials: 'include',
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            clearTimeout(timeout)
+            const err = await res.json().catch(() => ({ detail: 'Request failed' }))
+            reject(new ApiError(res.status, err.detail || 'Request failed'))
+            return
+          }
+          const reader = res.body?.getReader()
+          if (!reader) {
+            clearTimeout(timeout)
+            reject(new ApiError(500, 'No response body'))
+            return
+          }
+          const decoder = new TextDecoder()
+          let buffer = ''
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue
+              try {
+                const payload = JSON.parse(line.slice(6))
+                if (payload.status === 'complete') {
+                  clearTimeout(timeout)
+                  resolve(payload)
+                  return
+                }
+                if (payload.status === 'error') {
+                  clearTimeout(timeout)
+                  reject(new ApiError(500, payload.error || 'Server error'))
+                  return
+                }
+                onProgress?.(payload.status)
+              } catch {
+                // ignore non-JSON lines
+              }
+            }
+          }
+          clearTimeout(timeout)
+          reject(new ApiError(500, 'Stream ended without a complete response'))
+        })
+        .catch((err) => {
+          clearTimeout(timeout)
+          if (err.name === 'AbortError') return
+          reject(err instanceof ApiError ? err : new ApiError(500, err.message))
+        })
+    })
+  },
 }
 
 // Learning endpoints
 export const learning = {
   getState: (token: string, bookId: string) =>
     fetchApi<{
+      current_day: number
+      completed_days: number[]
       current_chapter: number
       completed_chapters: number[]
       motivation_score: number
@@ -419,30 +533,39 @@ export const learning = {
       quiz_pass_rate: number
     }>(`/api/learning/progress/${bookId}`, { token }),
 
-  // Detailed progress with chapter-by-chapter tracking
+  // Detailed progress with chapter->day hierarchy for sidebar
   getDetailedProgress: (token: string, bookId: string) =>
     fetchApi<{
-      completed_chapters: number[]
-      total_chapters: number
-      completion_percentage: number
+      current_day: number
       current_chapter: number
-      total_study_time_minutes: number
-      avg_time_per_chapter: number
-      quiz_pass_rate: number
-      avg_attention_score: number
-      avg_comprehension_score: number
-      motivation_score: number
-      chapter_summaries: Array<{
+      completed_days: number[]
+      completed_chapters: number[]
+      total_days: number
+      total_chapters: number
+      day_completion_percentage: number
+      chapter_completion_percentage: number
+      sidebar_chapters: Array<{
         chapter_number: number
         title: string
         is_completed: boolean
         is_current: boolean
-        summary: string | null
-        estimated_duration_minutes: number
+        days: Array<{
+          day: number
+          title: string
+          is_completed: boolean
+          is_current: boolean
+          is_rest: boolean
+        }>
       }>
+      total_study_time_minutes: number
+      quiz_pass_rate: number
+      motivation_score: number
       current_phase: string
       plan_data: Record<string, unknown> | null
-      estimated_completion_date: string | null
+      scope_completion_percentage?: number
+      scope_remaining_topics?: string[]
+      scope_total_topics?: number
+      scope_covered_topics?: number
     }>(`/api/learning/progress/${bookId}/detailed`, { token }),
 
   // Reset learning state
@@ -574,6 +697,106 @@ export const admin = {
       memory_usage_percent: number
     }>('/api/admin/system/health', { token }),
 
+  getDetailedServerMetrics: (token: string) =>
+    fetchApi<{
+      timestamp: string
+      system_info: {
+        hostname: string
+        platform: string
+        platform_release: string
+        platform_version: string
+        architecture: string
+        processor: string
+        python_version: string
+        boot_time: string
+        uptime_seconds: number
+        uptime_formatted: string
+      }
+      cpu: {
+        usage_percent: number
+        core_count: number
+        logical_count: number
+        frequency_mhz: number | null
+        per_core_usage: number[]
+        load_average_1m: number | null
+        load_average_5m: number | null
+        load_average_15m: number | null
+      }
+      memory: {
+        total_gb: number
+        available_gb: number
+        used_gb: number
+        usage_percent: number
+        swap_total_gb: number
+        swap_used_gb: number
+        swap_percent: number
+      }
+      disk: {
+        total_gb: number
+        used_gb: number
+        free_gb: number
+        usage_percent: number
+        read_bytes_per_sec: number
+        write_bytes_per_sec: number
+        partitions: Array<{
+          device: string
+          mountpoint: string
+          fstype: string
+          total_gb: number
+          used_gb: number
+          percent: number
+        }>
+      }
+      network: {
+        bytes_sent_per_sec: number
+        bytes_recv_per_sec: number
+        packets_sent_per_sec: number
+        packets_recv_per_sec: number
+        connections_count: number
+        interfaces: Array<{
+          name: string
+          is_up: boolean
+          addresses: Array<{ type: string; address: string }>
+        }>
+      }
+      processes: {
+        total_processes: number
+        running_processes: number
+        sleeping_processes: number
+        top_cpu_processes: Array<{
+          pid: number
+          name: string
+          cpu_percent: number
+          memory_percent: number
+        }>
+        top_memory_processes: Array<{
+          pid: number
+          name: string
+          cpu_percent: number
+          memory_percent: number
+        }>
+      }
+      health_status: string
+      health_issues: string[]
+    }>('/api/admin/system/metrics', { token }),
+
+  getMetricsHistory: (token: string, hours: number = 24) =>
+    fetchApi<{
+      period_hours: number
+      metrics: Record<string, Array<{ timestamp: string; value: number }>>
+    }>(`/api/admin/system/metrics/history?hours=${hours}`, { token }),
+
+  triggerPricingSync: (token: string) =>
+    fetchApi<{
+      success: boolean
+      changes: {
+        added: string[]
+        updated: string[]
+        unchanged: string[]
+        errors: Array<{ model: string; error: string }>
+      }
+    }>('/api/admin/system/pricing/sync', { method: 'POST', token }),
+
   listFeatureFlags: (token: string) =>
     fetchApi<
       Array<{
@@ -595,6 +818,495 @@ export const admin = {
       token,
       body: JSON.stringify(data),
     }),
+
+  // New comprehensive analytics endpoints
+  getPlatformStats: (token: string) =>
+    fetchApi<{
+      users: {
+        total: number
+        new_today: number
+        new_this_week: number
+        active_24h: number
+        active_7d: number
+        tier_breakdown: Record<string, number>
+      }
+      usage_today: {
+        requests: number
+        input_tokens: number
+        output_tokens: number
+        total_tokens: number
+      }
+      costs: {
+        platform_today_cents: number
+        platform_today_usd: number
+        platform_month_cents: number
+        platform_month_usd: number
+      }
+      model_breakdown: Array<{
+        model: string
+        requests: number
+        cost_cents: number
+        tokens: number
+      }>
+    }>('/api/admin/analytics/platform-stats', { token }),
+
+  getUsageTimeline: (token: string, days: number = 30) =>
+    fetchApi<
+      Array<{
+        date: string
+        requests: number
+        tokens: number
+        platform_cost_cents: number
+        active_users: number
+      }>
+    >(`/api/admin/analytics/usage-timeline?days=${days}`, { token }),
+
+  getTopUsers: (token: string, limit: number = 20) =>
+    fetchApi<
+      Array<{
+        user_id: string
+        email: string
+        name: string
+        tier: string
+        requests: number
+        tokens: number
+        cost_cents: number
+      }>
+    >(`/api/admin/analytics/top-users?limit=${limit}`, { token }),
+
+  getUserUsageDetail: (token: string, userId: string) =>
+    fetchApi<{
+      user: {
+        id: string
+        email: string
+        name: string
+        created_at: string
+      }
+      subscription: {
+        tier: string
+        preferred_model: string | null
+        pdfs_used: number
+        messages_used: number
+        quizzes_used: number
+      } | null
+      all_time: {
+        requests: number
+        tokens: number
+        cost_cents: number
+      }
+      recent_logs: Array<{
+        id: string
+        type: string
+        model: string
+        tokens: number
+        cost_cents: number
+        paid_by: string
+        created_at: string
+      }>
+    }>(`/api/admin/analytics/user/${userId}`, { token }),
+
+  getCostsBreakdown: (token: string, days: number = 30) =>
+    fetchApi<{
+      period_days: number
+      by_model: Array<{
+        model: string
+        platform_cost_cents: number
+        user_cost_cents: number
+        requests: number
+      }>
+      by_usage_type: Array<{
+        type: string
+        platform_cost_cents: number
+        user_cost_cents: number
+        requests: number
+      }>
+      totals: {
+        platform_cost_cents: number
+        platform_cost_usd: number
+        user_cost_cents: number
+        user_cost_usd: number
+      }
+    }>(`/api/admin/analytics/costs-breakdown?days=${days}`, { token }),
+
+  listSubscriptions: (token: string, page: number = 1, tier?: string) =>
+    fetchApi<
+      Array<{
+        id: string
+        user_id: string
+        email: string
+        name: string
+        tier: string
+        preferred_model: string | null
+        usage: { pdfs: number; messages: number; quizzes: number }
+        limits: { pdfs: number; messages: number; quizzes: number }
+        billing_cycle_start: string
+      }>
+    >(`/api/admin/subscriptions?page=${page}${tier ? `&tier=${tier}` : ''}`, { token }),
+
+  listUsersWithUsage: (token: string, page: number = 1, search?: string, tier?: string, sortBy?: string) =>
+    fetchApi<
+      Array<{
+        id: string
+        email: string
+        name: string
+        role: string
+        is_active: boolean
+        created_at: string
+        tier: string
+        preferred_model: string | null
+        books_count: number
+        usage: {
+          all_time: {
+            requests: number
+            tokens: number
+            platform_cost_cents: number
+            user_cost_cents: number
+          }
+          this_month: {
+            requests: number
+            tokens: number
+            platform_cost_cents: number
+            user_cost_cents: number
+          }
+          subscription: {
+            pdfs_used: number
+            messages_used: number
+            quizzes_used: number
+            pdf_limit: number
+            message_limit: number
+            quiz_limit: number
+          } | null
+        }
+        last_active: string | null
+      }>
+    >(`/api/admin/users-with-usage?page=${page}${search ? `&search=${encodeURIComponent(search)}` : ''}${tier ? `&tier=${tier}` : ''}${sortBy ? `&sort_by=${sortBy}` : ''}`, { token }),
+
+  updateUserTier: (token: string, userId: string, tier: string) =>
+    fetchApi<{ success: boolean; user_id: string; new_tier: string }>(
+      `/api/admin/subscriptions/${userId}/tier?tier=${tier}`,
+      { method: 'PATCH', token }
+    ),
+
+  listFeedback: (token: string, page: number = 1, status?: string, type?: string) =>
+    fetchApi<
+      Array<{
+        id: string
+        user_id: string
+        user_email: string
+        user_name: string
+        feedback_type: string
+        rating: number | null
+        title: string | null
+        content: string
+        status: string
+        created_at: string
+      }>
+    >(`/api/admin/feedback?page=${page}${status ? `&status_filter=${status}` : ''}${type ? `&feedback_type=${type}` : ''}`, { token }),
+
+  updateFeedback: (token: string, feedbackId: string, data: { status: string; admin_notes?: string }) =>
+    fetchApi(`/api/admin/feedback/${feedbackId}`, {
+      method: 'PATCH',
+      token,
+      body: JSON.stringify(data),
+    }),
+
+  listModelPricing: (token: string) =>
+    fetchApi<
+      Array<{
+        id: string
+        model_name: string
+        display_name: string
+        input_price_per_million: number
+        output_price_per_million: number
+        cached_input_price_per_million: number | null
+        is_available: boolean
+        supports_batch: boolean
+        available_for_free: boolean
+        available_for_byok: boolean
+        description: string | null
+      }>
+    >('/api/admin/models/pricing', { token }),
+
+  updateModelPricing: (token: string, modelName: string, data: Record<string, unknown>) =>
+    fetchApi(`/api/admin/models/pricing/${modelName}`, {
+      method: 'PATCH',
+      token,
+      body: JSON.stringify(data),
+    }),
+
+  getBooksAnalytics: (token: string, days: number = 30) =>
+    fetchApi<{
+      total_books: number
+      new_books_period: number
+      status_breakdown: Record<string, number>
+      daily_uploads: Array<{ date: string; count: number }>
+      learning_stats: {
+        total_active_learners: number
+        avg_study_time_minutes: number
+      }
+    }>(`/api/admin/analytics/books?days=${days}`, { token }),
+
+  getQuizAnalytics: (token: string, days: number = 30) =>
+    fetchApi<{
+      total_completed: number
+      completed_in_period: number
+      average_score: number
+      pass_rate: number
+      daily_completions: Array<{
+        date: string
+        count: number
+        avg_score: number
+      }>
+    }>(`/api/admin/analytics/quizzes?days=${days}`, { token }),
+
+  listBooks: (token: string, page: number = 1, userId?: string, status?: string) =>
+    fetchApi<
+      Array<{
+        id: string
+        title: string
+        author: string | null
+        processing_status: string
+        processing_progress: number
+        processing_step: string | null
+        total_chapters: number | null
+        created_at: string
+        user_id: string
+        user_email: string
+        user_name: string
+      }>
+    >(`/api/admin/books?page=${page}${userId ? `&user_id=${userId}` : ''}${status ? `&status=${status}` : ''}`, { token }),
+
+  getBookDetail: (token: string, bookId: string) =>
+    fetchApi<{
+      id: string
+      title: string
+      author: string | null
+      processing_status: string
+      processing_progress: number
+      processing_step: string | null
+      processing_error: string | null
+      total_pages: number | null
+      total_chapters: number | null
+      created_at: string
+      user: {
+        id: string
+        email: string
+        name: string
+      }
+      learning: {
+        current_day: number | null
+        current_chapter: number | null
+        total_study_time_minutes: number
+        last_active_at: string | null
+      } | null
+      quizzes: {
+        total_completed: number
+        average_score: number
+      }
+    }>(`/api/admin/books/${bookId}`, { token }),
+}
+
+// Usage endpoints (user-facing)
+export const usage = {
+  getSummary: (token: string) =>
+    fetchApi<{
+      tier: string
+      billing_cycle_start: string
+      usage: {
+        pdfs: { used: number; limit: number; unlimited: boolean }
+        messages: { used: number; limit: number; unlimited: boolean }
+        quizzes: { used: number; limit: number; unlimited: boolean }
+      }
+      tokens: { input: number; output: number; total: number }
+      cost_cents: number
+      total_requests: number
+      model_breakdown: Record<string, { count: number; cost_cents: number }>
+      preferred_model: string | null
+      use_batch_api: boolean
+    }>('/api/usage/summary', { token }),
+
+  checkLimit: (token: string, feature: 'pdf' | 'message' | 'quiz') =>
+    fetchApi<{
+      can_use: boolean
+      error_message: string | null
+      usage_info: {
+        tier: string
+        unlimited: boolean
+        used: number
+        limit?: number
+        remaining?: number
+        percentage_used?: number
+      }
+    }>(`/api/usage/check/${feature}`, { token }),
+
+  getTier: (token: string) =>
+    fetchApi<{
+      tier: string
+      limits: { pdfs: number; messages: number; quizzes: number }
+      usage: { pdfs: number; messages: number; quizzes: number }
+      preferred_model: string | null
+      use_batch_api: boolean
+      billing_cycle_start: string
+      is_unlimited: boolean
+    }>('/api/usage/tier', { token }),
+
+  getAvailableModels: (token: string) =>
+    fetchApi<
+      Array<{
+        model_name: string
+        display_name: string
+        description: string | null
+        input_price_per_million: number
+        output_price_per_million: number
+        cached_input_price_per_million: number | null
+        supports_batch: boolean
+        max_context_tokens: number
+        is_selected: boolean
+      }>
+    >('/api/usage/models', { token }),
+
+  setPreferredModel: (token: string, modelName: string) =>
+    fetchApi<{ success: boolean; preferred_model: string; message: string }>('/api/usage/models/select', {
+      method: 'POST',
+      token,
+      body: JSON.stringify({ model_name: modelName }),
+    }),
+
+  setBatchMode: (token: string, useBatchApi: boolean) =>
+    fetchApi<{ success: boolean; use_batch_api: boolean; message: string }>('/api/usage/batch-mode', {
+      method: 'POST',
+      token,
+      body: JSON.stringify({ use_batch_api: useBatchApi }),
+    }),
+
+  submitFeedback: (
+    token: string,
+    data: {
+      feedback_type: string
+      rating?: number
+      title?: string
+      content: string
+      book_id?: string
+      session_id?: string
+      page_url?: string
+    }
+  ) =>
+    fetchApi<{ id: string; feedback_type: string; status: string; created_at: string }>('/api/usage/feedback', {
+      method: 'POST',
+      token,
+      body: JSON.stringify(data),
+    }),
+
+  getMyFeedback: (token: string) =>
+    fetchApi<
+      Array<{
+        id: string
+        feedback_type: string
+        rating: number | null
+        title: string | null
+        content: string
+        status: string
+        created_at: string
+      }>
+    >('/api/usage/feedback/mine', { token }),
+
+  getPricing: () =>
+    fetchApi<{
+      tiers: Record<
+        string,
+        {
+          name: string
+          price: string
+          limits: Record<string, number | string>
+          features: string[]
+        }
+      >
+      models: Array<{
+        model_name: string
+        display_name: string
+        description: string | null
+        pricing: {
+          input_per_million: string
+          output_per_million: string
+          cached_input_per_million: string | null
+        }
+        available_for_free: boolean
+        supports_batch: boolean
+      }>
+    }>('/api/usage/pricing', {}),
+
+  // BYOK Dashboard endpoints
+  getBYOKDashboard: (token: string) =>
+    fetchApi<{
+      is_byok: boolean
+      current_month: {
+        requests: number
+        input_tokens: number
+        output_tokens: number
+        cached_tokens: number
+        total_tokens: number
+        cost_cents: number
+        cost_usd: number
+        today_requests: number
+        today_cost_cents: number
+        billing_cycle_start: string
+      }
+      daily_breakdown: Array<{
+        date: string
+        requests: number
+        input_tokens: number
+        output_tokens: number
+        cost_cents: number
+      }>
+      model_usage: Array<{
+        model_name: string
+        display_name: string
+        requests: number
+        input_tokens: number
+        output_tokens: number
+        cost_cents: number
+        percentage: number
+      }>
+      recent_activity: Array<{
+        id: string
+        type: string
+        model: string
+        input_tokens: number
+        output_tokens: number
+        cost_cents: number
+        book_title: string | null
+        created_at: string
+      }>
+      cost_projections: {
+        daily_average_cents: number
+        projected_monthly_cents: number
+        last_month_cents: number
+        month_over_month_change: number
+      }
+    }>('/api/usage/byok/dashboard', { token }),
+
+  getBYOKRealtime: (token: string) =>
+    fetchApi<{
+      is_byok: boolean
+      today: {
+        cost_cents: number
+        cost_usd: number
+        requests: number
+      }
+      month: {
+        cost_cents: number
+        cost_usd: number
+        requests: number
+      }
+      last_activity: {
+        type: string
+        model: string
+        cost_cents: number
+        created_at: string
+      } | null
+      preferred_model: string | null
+      timestamp: string
+    }>('/api/usage/byok/realtime', { token }),
 }
 
 // Notes endpoints
@@ -655,4 +1367,5 @@ export default {
   planning,
   admin,
   notes,
+  usage,
 }

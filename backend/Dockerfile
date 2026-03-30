@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -19,8 +19,16 @@ COPY . .
 # Create data directories
 RUN mkdir -p /app/data/pdfs /app/data/logs /app/data/cache
 
-# Expose port
 EXPOSE 8000
 
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Gunicorn with Uvicorn workers: 4 workers = 4 independent event loops.
+# --timeout 120 accommodates long-running chat requests.
+# --graceful-timeout 30 allows in-flight requests to complete on shutdown.
+CMD ["gunicorn", "app.main:app", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "-w", "4", \
+     "--bind", "0.0.0.0:8000", \
+     "--timeout", "120", \
+     "--graceful-timeout", "30", \
+     "--keep-alive", "5", \
+     "--access-logfile", "-"]

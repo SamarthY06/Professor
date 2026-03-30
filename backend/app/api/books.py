@@ -1,13 +1,19 @@
-"""Book management API routes."""
+"""Book management API routes.
 
-import asyncio
+This module handles book uploads and delegates document processing
+to the external RAG service via Temporal workflows.
+
+IMPORTANT: ProfessorOS never ingests or embeds PDFs itself.
+All document intelligence is delegated to the external RAG service.
+"""
+
 import hashlib
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,179 +24,15 @@ from app.db.database import get_db, async_session_maker
 from app.dependencies import get_current_user_id
 from app.logs.logger import get_logger
 from app.models.book import Book, BookChapter
-from app.models.learning_config import LearningConfig, ConversationState
+from app.models.learning_config import LearningConfig
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
-async def process_book_task(book_id: UUID):
-    """
-    Background task to process a book through RAG pipeline.
-    
-    Per Goals.md:
-    - Step 2: Chunking happens
-    - Step 3: When complete, Professor auto-triggers with greeting
-    """
-    from app.rag.ingestion import PDFIngestionService
-    
-    async with async_session_maker() as db:
-        try:
-            result = await db.execute(select(Book).where(Book.id == book_id))
-            book = result.scalar_one_or_none()
-            
-            if not book:
-                logger.error("book_not_found_for_processing", book_id=str(book_id))
-                return
-            
-            # Get user's API key or use default
-            from app.services.api_key_service import APIKeyService
-            api_key_service = APIKeyService(db)
-            api_key = await api_key_service.get_api_key_for_user(book.user_id)
-            
-            # Process book (Step 2: Chunking & Embeddings)
-            ingestion_service = PDFIngestionService(db, api_key=api_key)
-            success = await ingestion_service.process_book(book)
-            
-            if success:
-                # Update status to ready_for_planning (not just completed)
-                # This indicates chunking is done but professor hasn't greeted yet
-                book.processing_status = "ready_for_planning"
-                await db.commit()
-                
-                logger.info(
-                    "book_processing_completed_ready_for_professor",
-                    book_id=str(book_id),
-                    user_id=str(book.user_id),
-                )
-                
-                # Step 3: Trigger Professor Auto-Greeting
-                # This creates the initial conversation state and sends greeting
-                await trigger_professor_greeting(db, book)
-                
-            else:
-                logger.error("book_processing_failed", book_id=str(book_id))
-                
-        except Exception as e:
-            logger.exception("book_processing_error", book_id=str(book_id), error=str(e))
-            # Update book status to failed
-            result = await db.execute(select(Book).where(Book.id == book_id))
-            book = result.scalar_one_or_none()
-            if book:
-                book.processing_status = "failed"
-                book.processing_error = str(e)
-                await db.commit()
-
-
-async def trigger_professor_greeting(db: AsyncSession, book: Book):
-    """
-    Trigger professor's auto-greeting after book processing completes.
-    
-    Per Goals.md Step 3:
-    > "Once chunking completes, the Professor Agent automatically triggers"
-    
-    This is a simple template greeting with dynamic book info.
-    The REAL agents (PlannerAgent, TeachingAgent, QuizAgent) do the actual work.
-    """
-    from app.models.chat import ChatSession, ChatMessage
-    from app.models.learning import LearningState
-    
-    try:
-        # Create or get learning state
-        result = await db.execute(
-            select(LearningState)
-            .where(LearningState.user_id == book.user_id)
-            .where(LearningState.book_id == book.id)
-        )
-        learning_state = result.scalar_one_or_none()
-        
-        if not learning_state:
-            learning_state = LearningState(
-                user_id=book.user_id,
-                book_id=book.id,
-                current_chapter=1,
-            )
-            db.add(learning_state)
-            await db.flush()
-        
-        # Create conversation state to track where we are
-        conversation_state = ConversationState(
-            user_id=book.user_id,
-            book_id=book.id,
-            phase="greeting",
-            last_professor_action="greeting_sent",
-        )
-        db.add(conversation_state)
-        
-        # Create a chat session for this interaction
-        session = ChatSession(
-            user_id=book.user_id,
-            learning_state_id=learning_state.id,
-            book_id=book.id,
-            chapter_context=1,
-            session_type="onboarding",
-        )
-        db.add(session)
-        await db.flush()
-        
-        # Get learning config for personalization
-        config_result = await db.execute(
-            select(LearningConfig).where(LearningConfig.book_id == book.id)
-        )
-        config = config_result.scalar_one_or_none()
-        
-        # Simple template greeting with dynamic data
-        # The REAL work happens in PlannerAgent, TeachingAgent, QuizAgent
-        level_note = {
-            "beginner": "I'll explain concepts clearly with plenty of examples.",
-            "intermediate": "I'll balance depth with clarity as we explore the material.",
-            "advanced": "I'll dive deep into technical details and nuances.",
-            "research": "I'll focus on advanced analysis and research implications.",
-        }.get(config.learning_level if config else "intermediate", "")
-        
-        greeting = f"""Hello! 👋
-
-I've finished analyzing **"{book.title}"**. I found **{book.total_chapters or 'several'} chapters** of material to explore together.
-
-{level_note}
-
-**Would you like me to create a personalized learning plan for you?**
-
-The plan will include:
-• A day-by-day schedule based on your timeline
-• Estimated time for each chapter
-• Quiz checkpoints to reinforce your learning
-
-Just say **"Yes"** or **"Let's plan"** when you're ready!"""
-
-        # Store the greeting message
-        greeting_message = ChatMessage(
-            session_id=session.id,
-            role="assistant",
-            content=greeting,
-            agent_name="Professor",
-            chapter_at_time=1,
-        )
-        db.add(greeting_message)
-        
-        # Mark book as greeted
-        book.professor_greeted = True
-        book.professor_greeting_at = datetime.utcnow()
-        book.processing_status = "completed"
-        
-        await db.commit()
-        
-        logger.info(
-            "professor_greeting_triggered",
-            book_id=str(book.id),
-            user_id=str(book.user_id),
-            session_id=str(session.id),
-        )
-        
-    except Exception as e:
-        logger.exception("professor_greeting_failed", book_id=str(book.id), error=str(e))
-        await db.rollback()
-
+# =============================================================================
+# Response Models
+# =============================================================================
 
 class BookResponse(BaseModel):
     """Book response model."""
@@ -220,24 +62,6 @@ class BookStatusResponse(BaseModel):
     total_chapters: Optional[int]
 
 
-class BookDetailResponse(BaseModel):
-    """Book detail response with chapters."""
-    id: UUID
-    title: str
-    author: Optional[str]
-    total_pages: Optional[int]
-    total_chapters: Optional[int]
-    processing_status: str
-    processing_progress: int = 0
-    processing_step: Optional[str] = None
-    processing_error: Optional[str] = None
-    created_at: datetime
-    chapters: List["ChapterResponse"]
-
-    class Config:
-        from_attributes = True
-
-
 class ChapterResponse(BaseModel):
     """Chapter response model."""
     id: UUID
@@ -252,11 +76,148 @@ class ChapterResponse(BaseModel):
         from_attributes = True
 
 
+class BookDetailResponse(BaseModel):
+    """Book detail response with chapters."""
+    id: UUID
+    title: str
+    author: Optional[str]
+    total_pages: Optional[int]
+    total_chapters: Optional[int]
+    processing_status: str
+    processing_progress: int = 0
+    processing_step: Optional[str] = None
+    processing_error: Optional[str] = None
+    created_at: datetime
+    chapters: List[ChapterResponse]
+
+    class Config:
+        from_attributes = True
+
+
+class BookUploadResponse(BaseModel):
+    """Response after uploading a book."""
+    id: UUID
+    title: str
+    author: Optional[str]
+    processing_status: str
+    message: str
+    
+    class Config:
+        from_attributes = True
+
+
 class BookUpdateRequest(BaseModel):
     """Book update request."""
     title: Optional[str] = None
     author: Optional[str] = None
 
+
+class LearningConfigRequest(BaseModel):
+    """Learning configuration collected during upload."""
+    learning_level: str = Field(
+        default="intermediate",
+        description="Student level: beginner, intermediate, advanced, research"
+    )
+    study_all_chapters: bool = Field(
+        default=True,
+        description="Whether to study all chapters or selected ones"
+    )
+    selected_chapters: Optional[List[int]] = Field(
+        default=None,
+        description="List of chapter numbers to study (if not all)"
+    )
+    deadline: Optional[date] = Field(
+        default=None,
+        description="Target completion date"
+    )
+    daily_study_minutes: int = Field(
+        default=60,
+        description="Preferred daily study time in minutes"
+    )
+    quiz_frequency: str = Field(
+        default="after_each_chapter",
+        description="Quiz timing: after_each_chapter, after_n_chapters, final_only"
+    )
+    quiz_after_n_chapters: Optional[int] = Field(
+        default=None,
+        description="If quiz_frequency is after_n_chapters, how many"
+    )
+    questions_per_quiz: int = Field(
+        default=5,
+        description="Number of questions per quiz"
+    )
+    enable_reminders: bool = Field(
+        default=True,
+        description="Enable inactivity reminders"
+    )
+    reminder_channel: str = Field(
+        default="push",
+        description="Reminder channel: push, email, whatsapp, all"
+    )
+    inactivity_threshold_hours: int = Field(
+        default=24,
+        description="Hours of inactivity before reminder"
+    )
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+async def start_document_ingestion_workflow(
+    book_id: UUID,
+    user_id: UUID,
+    file_path: str,
+    filename: str,
+) -> str:
+    """
+    Start the Temporal workflow to track document ingestion.
+    
+    Args:
+        book_id: Book ID in Professor DB
+        user_id: User ID
+        file_path: Path to the uploaded PDF
+        filename: Original filename
+    
+    Returns:
+        Workflow ID
+    """
+    from app.temporal.client import get_temporal_client
+    from app.temporal.workflows.document_ingestion import TrackDocumentIngestionWorkflow
+    from app.config.rag import get_rag_config
+    
+    rag_config = get_rag_config()
+    client = await get_temporal_client()
+    
+    workflow_id = f"doc-ingestion-{book_id}"
+    
+    await client.start_workflow(
+        TrackDocumentIngestionWorkflow.run,
+        args=[
+            str(book_id),
+            str(user_id),
+            file_path,
+            filename,
+            rag_config.rag_poll_interval_seconds,
+            1800,  # 30 minutes max
+        ],
+        id=workflow_id,
+        task_queue=settings.temporal_task_queue,
+    )
+    
+    logger.info(
+        "document_ingestion_workflow_started",
+        workflow_id=workflow_id,
+        book_id=str(book_id),
+        user_id=str(user_id),
+    )
+    
+    return workflow_id
+
+
+# =============================================================================
+# API Endpoints
+# =============================================================================
 
 @router.get("/", response_model=List[BookResponse])
 async def list_books(
@@ -264,7 +225,6 @@ async def list_books(
     db: AsyncSession = Depends(get_db),
 ):
     """List all books for the current user."""
-    # Expire all to ensure we get fresh data (for polling during processing)
     db.expire_all()
     
     result = await db.execute(
@@ -353,87 +313,15 @@ async def get_book(
     )
 
 
-class LearningConfigRequest(BaseModel):
-    """Learning configuration collected during upload (per Goals.md Step 1)."""
-    
-    # Learning Level
-    learning_level: str = Field(
-        default="intermediate",
-        description="Student level: beginner, intermediate, advanced, research"
-    )
-    
-    # Chapter Selection
-    study_all_chapters: bool = Field(
-        default=True,
-        description="Whether to study all chapters or selected ones"
-    )
-    selected_chapters: Optional[List[int]] = Field(
-        default=None,
-        description="List of chapter numbers to study (if not all)"
-    )
-    
-    # Timeline
-    deadline: Optional[date] = Field(
-        default=None,
-        description="Target completion date"
-    )
-    daily_study_minutes: int = Field(
-        default=60,
-        description="Preferred daily study time in minutes"
-    )
-    
-    # Quiz Preferences
-    quiz_frequency: str = Field(
-        default="after_each_chapter",
-        description="Quiz timing: after_each_chapter, after_n_chapters, final_only"
-    )
-    quiz_after_n_chapters: Optional[int] = Field(
-        default=None,
-        description="If quiz_frequency is after_n_chapters, how many"
-    )
-    questions_per_quiz: int = Field(
-        default=5,
-        description="Number of questions per quiz"
-    )
-    
-    # Reminders
-    enable_reminders: bool = Field(
-        default=True,
-        description="Enable inactivity reminders"
-    )
-    reminder_channel: str = Field(
-        default="push",
-        description="Reminder channel: push, email, whatsapp, all"
-    )
-    inactivity_threshold_hours: int = Field(
-        default=24,
-        description="Hours of inactivity before reminder"
-    )
-
-
-class BookUploadResponse(BaseModel):
-    """Response after uploading a book."""
-    id: UUID
-    title: str
-    author: Optional[str]
-    processing_status: str
-    message: str
-    
-    class Config:
-        from_attributes = True
-
-
 @router.post("/upload", response_model=BookUploadResponse)
 async def upload_book(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
     author: Optional[str] = Form(None),
-    # Learning Configuration (as JSON string in form data)
     learning_level: str = Form("intermediate"),
     study_all_chapters: bool = Form(True),
-    selected_chapters: Optional[str] = Form(None),  # JSON array string
-    deadline: Optional[str] = Form(None),  # ISO date string
+    selected_chapters: Optional[str] = Form(None),
+    deadline: Optional[str] = Form(None),
     daily_study_minutes: int = Form(60),
     quiz_frequency: str = Form("after_each_chapter"),
     quiz_after_n_chapters: Optional[int] = Form(None),
@@ -447,17 +335,27 @@ async def upload_book(
     """
     Upload a PDF book with learning configuration.
     
-    Per Goals.md Step 1, this collects:
-    - Learning level (BTech / MTech / Research)
-    - Chapters to study (full book or selected chapters)
-    - Deadline / timeline
-    - Quiz preferences
-    - Reminder & inactivity preferences
+    The document is forwarded to the external RAG service for processing.
+    A Temporal workflow tracks the ingestion progress and updates the UI.
     
-    After upload, the book is processed asynchronously.
-    When processing completes, Professor auto-triggers with greeting (Step 3).
+    ProfessorOS NEVER processes PDFs internally - all document intelligence
+    is delegated to the external RAG service.
+    
+    FREEMIUM LIMITS:
+    - Free tier: Max 3 books
+    - BYOK tier: Max 10 books
+    - Pro tier: Unlimited books
     """
     import json
+    from app.services.freemium_service import check_book_upload_limit
+    
+    # Check freemium book upload limit
+    can_upload, limit_error = await check_book_upload_limit(db, user_id)
+    if not can_upload:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=limit_error,
+        )
     
     # Validate file type
     if not file.filename.lower().endswith(".pdf"):
@@ -491,7 +389,7 @@ async def upload_book(
             detail="This book has already been uploaded",
         )
     
-    # Save file
+    # Save file locally (for Temporal workflow to access)
     file_path = os.path.join(
         settings.pdf_storage_path,
         str(user_id),
@@ -502,17 +400,18 @@ async def upload_book(
     with open(file_path, "wb") as f:
         f.write(contents)
     
-    # Create book record
+    # Create book record with INGESTING_EXTERNAL status
     book = Book(
         user_id=user_id,
         title=title or file.filename.replace(".pdf", ""),
         author=author,
         file_path=file_path,
         file_hash=file_hash,
-        processing_status="pending",
+        processing_status="ingesting_external",  # New status for external RAG
+        processing_step="Uploading to document service...",
     )
     db.add(book)
-    await db.flush()  # Get book.id
+    await db.flush()
     
     # Parse and create learning configuration
     parsed_chapters = None
@@ -550,17 +449,35 @@ async def upload_book(
     await db.refresh(book)
     
     logger.info(
-        "book_uploaded_with_config",
+        "book_uploaded",
         user_id=str(user_id),
         book_id=str(book.id),
         file_size_mb=round(file_size_mb, 2),
         learning_level=learning_level,
-        quiz_frequency=quiz_frequency,
     )
     
-    # Trigger async processing in background
-    # When complete, professor will auto-greet (Step 3)
-    background_tasks.add_task(process_book_task, book.id)
+    # Start Temporal workflow to track ingestion
+    try:
+        await start_document_ingestion_workflow(
+            book_id=book.id,
+            user_id=user_id,
+            file_path=file_path,
+            filename=file.filename,
+        )
+    except Exception as e:
+        logger.exception(
+            "workflow_start_failed",
+            book_id=str(book.id),
+            error=str(e),
+        )
+        # Update status to indicate workflow failure
+        book.processing_status = "pending"
+        book.processing_step = "Waiting for processing..."
+        await db.commit()
+    
+    # Increment monthly book usage for freemium tracking
+    from app.services.freemium_service import increment_book_usage
+    await increment_book_usage(db, user_id)
     
     return BookUploadResponse(
         id=book.id,
@@ -569,6 +486,143 @@ async def upload_book(
         processing_status=book.processing_status,
         message="Book uploaded successfully! Processing will begin shortly. "
                 "Professor will greet you once the analysis is complete.",
+    )
+
+
+@router.post("/upload-with-config", response_model=BookUploadResponse)
+async def upload_book_with_config(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    author: Optional[str] = Form(None),
+    learning_level: str = Form("intermediate"),
+    total_days: int = Form(30),
+    daily_minutes: int = Form(30),
+    quiz_frequency: str = Form("after_each_chapter"),
+    user_id: UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Upload a PDF book with learning configuration and generate plan.
+    
+    Simplified upload endpoint with key configuration options.
+    
+    FREEMIUM LIMITS:
+    - Free tier: Max 3 books
+    - BYOK/Pro tier: Unlimited (their API key, their cost)
+    """
+    from app.services.freemium_service import check_book_upload_limit
+    
+    # Check freemium book upload limit
+    can_upload, limit_error = await check_book_upload_limit(db, user_id)
+    if not can_upload:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=limit_error,
+        )
+    
+    # Validate file type
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files are supported",
+        )
+    
+    # Check file size
+    contents = await file.read()
+    file_size_mb = len(contents) / (1024 * 1024)
+    
+    if file_size_mb > settings.max_file_size_mb:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File size exceeds maximum of {settings.max_file_size_mb}MB",
+        )
+    
+    # Calculate file hash
+    file_hash = hashlib.sha256(contents).hexdigest()
+    
+    # Check for duplicate
+    result = await db.execute(
+        select(Book).where(Book.user_id == user_id, Book.file_hash == file_hash)
+    )
+    existing_book = result.scalar_one_or_none()
+    
+    if existing_book:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This book has already been uploaded",
+        )
+    
+    # Save file
+    file_path = os.path.join(
+        settings.pdf_storage_path,
+        str(user_id),
+        f"{file_hash}.pdf",
+    )
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    with open(file_path, "wb") as f:
+        f.write(contents)
+    
+    # Calculate deadline
+    deadline = date.today() + timedelta(days=total_days)
+    
+    # Create book record
+    book = Book(
+        user_id=user_id,
+        title=title,
+        author=author,
+        file_path=file_path,
+        file_hash=file_hash,
+        processing_status="ingesting_external",
+        processing_step="Uploading to document service...",
+    )
+    db.add(book)
+    await db.flush()
+    
+    # Create learning configuration
+    learning_config = LearningConfig(
+        user_id=user_id,
+        book_id=book.id,
+        learning_level=learning_level,
+        study_all_chapters=True,
+        deadline=deadline,
+        daily_study_minutes=daily_minutes,
+        quiz_frequency=quiz_frequency,
+        questions_per_quiz=5,
+        enable_reminders=True,
+    )
+    db.add(learning_config)
+    
+    await db.commit()
+    await db.refresh(book)
+    
+    logger.info(
+        "book_uploaded_with_config",
+        user_id=str(user_id),
+        book_id=str(book.id),
+        total_days=total_days,
+        daily_minutes=daily_minutes,
+    )
+    
+    # Start Temporal workflow
+    try:
+        await start_document_ingestion_workflow(
+            book_id=book.id,
+            user_id=user_id,
+            file_path=file_path,
+            filename=file.filename,
+        )
+    except Exception as e:
+        logger.exception("workflow_start_failed", book_id=str(book.id), error=str(e))
+        book.processing_status = "pending"
+        await db.commit()
+    
+    return BookUploadResponse(
+        id=book.id,
+        title=book.title,
+        author=book.author,
+        processing_status=book.processing_status,
+        message="Book uploaded! Professor will create your learning plan.",
     )
 
 
@@ -619,11 +673,11 @@ async def delete_book(
             detail="Book not found",
         )
     
-    # Delete file
+    # Delete local file
     if os.path.exists(book.file_path):
         os.remove(book.file_path)
     
-    # Delete from database (cascades to chunks, chapters, etc.)
+    # Delete from database (cascades to chapters, etc.)
     await db.delete(book)
     await db.commit()
     
@@ -632,57 +686,13 @@ async def delete_book(
     return {"message": "Book deleted successfully"}
 
 
-@router.post("/{book_id}/reprocess")
-async def reprocess_book(
-    book_id: UUID,
-    user_id: UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """Trigger reprocessing of a book (admin or owner only)."""
-    result = await db.execute(
-        select(Book).where(Book.id == book_id, Book.user_id == user_id)
-    )
-    book = result.scalar_one_or_none()
-    
-    if book is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Book not found",
-        )
-    
-    # Update status
-    book.processing_status = "pending"
-    book.processing_error = None
-    await db.commit()
-    
-    # Trigger async processing
-    # await trigger_book_processing(book.id)
-    
-    logger.info("book_reprocessing_triggered", book_id=str(book_id))
-    
-    return {"message": "Book reprocessing started"}
-
-
-class ChapterListResponse(BaseModel):
-    """Chapter list response for configuration page."""
-    id: UUID
-    chapter_number: int
-    title: str
-    estimated_duration_minutes: int
-    
-    class Config:
-        from_attributes = True
-
-
-@router.get("/{book_id}/chapters", response_model=List[ChapterListResponse])
+@router.get("/{book_id}/chapters", response_model=List[ChapterResponse])
 async def get_book_chapters(
     book_id: UUID,
     user_id: UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get chapters for a book (for configuration page)."""
-    from app.models.book import BookChapter
-    
+    """Get chapters for a book."""
     # Verify book ownership
     book_result = await db.execute(
         select(Book).where(Book.id == book_id, Book.user_id == user_id)
@@ -704,11 +714,13 @@ async def get_book_chapters(
     chapters = chapters_result.scalars().all()
     
     return [
-        ChapterListResponse(
+        ChapterResponse(
             id=ch.id,
             chapter_number=ch.chapter_number,
-            # Ensure meaningful title
-            title=ch.title if ch.title and len(ch.title) > 2 and not ch.title.isdigit() else f"Chapter {ch.chapter_number}",
+            title=ch.title if ch.title and len(ch.title) > 2 else f"Chapter {ch.chapter_number}",
+            start_page=ch.start_page,
+            end_page=ch.end_page,
+            summary=ch.summary,
             estimated_duration_minutes=ch.estimated_duration_minutes or 45,
         )
         for ch in chapters
@@ -732,9 +744,6 @@ async def save_book_config(
     db: AsyncSession = Depends(get_db),
 ):
     """Save learning configuration for a book."""
-    from app.models.learning_config import LearningConfig
-    from datetime import datetime
-    
     # Verify book ownership
     book_result = await db.execute(
         select(Book).where(Book.id == book_id, Book.user_id == user_id)
@@ -766,7 +775,6 @@ async def save_book_config(
     existing_config = existing_result.scalar_one_or_none()
     
     if existing_config:
-        # Update existing
         existing_config.deadline = target_date
         existing_config.daily_study_minutes = config.daily_study_minutes
         existing_config.learning_level = config.learning_level
@@ -774,7 +782,6 @@ async def save_book_config(
         existing_config.selected_chapters = config.selected_chapters
         existing_config.study_all_chapters = len(config.selected_chapters) == book.total_chapters
     else:
-        # Create new
         new_config = LearningConfig(
             user_id=user_id,
             book_id=book_id,
@@ -793,140 +800,53 @@ async def save_book_config(
         "book_config_saved",
         book_id=str(book_id),
         user_id=str(user_id),
-        daily_minutes=config.daily_study_minutes,
-        level=config.learning_level,
     )
     
     return {"success": True, "message": "Configuration saved"}
 
 
-# ============================================================================
-# UPLOAD WITH CONFIG ENDPOINT (for new UI flow)
-# ============================================================================
-
-@router.post("/upload-with-config", response_model=BookUploadResponse)
-async def upload_book_with_config(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    title: str = Form(...),
-    author: Optional[str] = Form(None),
-    learning_level: str = Form("intermediate"),
-    total_days: int = Form(30),
-    daily_minutes: int = Form(30),
-    quiz_frequency: str = Form("after_each_chapter"),
+@router.post("/{book_id}/reprocess")
+async def reprocess_book(
+    book_id: UUID,
     user_id: UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Upload a PDF book with learning configuration and generate plan.
-    
-    Per Goals.md Step 1:
-    - Learning level
-    - Days to complete (total_days)
-    - Daily study time (daily_minutes)
-    - Quiz frequency
-    
-    After processing, generates a day-by-day learning plan.
-    """
-    from datetime import timedelta
-    
-    # Validate file type
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only PDF files are supported",
-        )
-    
-    # Check file size
-    contents = await file.read()
-    file_size_mb = len(contents) / (1024 * 1024)
-    
-    if file_size_mb > settings.max_file_size_mb:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File size exceeds maximum of {settings.max_file_size_mb}MB",
-        )
-    
-    # Calculate file hash for deduplication
-    file_hash = hashlib.sha256(contents).hexdigest()
-    
-    # Check for duplicate
+    """Trigger reprocessing of a book via external RAG service."""
     result = await db.execute(
-        select(Book).where(Book.user_id == user_id, Book.file_hash == file_hash)
+        select(Book).where(Book.id == book_id, Book.user_id == user_id)
     )
-    existing_book = result.scalar_one_or_none()
+    book = result.scalar_one_or_none()
     
-    if existing_book:
+    if book is None:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This book has already been uploaded",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Book not found",
         )
     
-    # Save file
-    file_path = os.path.join(
-        settings.pdf_storage_path,
-        str(user_id),
-        f"{file_hash}.pdf",
-    )
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    
-    with open(file_path, "wb") as f:
-        f.write(contents)
-    
-    # Calculate deadline from total_days
-    deadline = date.today() + timedelta(days=total_days)
-    
-    # Create book record
-    book = Book(
-        user_id=user_id,
-        title=title,
-        author=author,
-        file_path=file_path,
-        file_hash=file_hash,
-        processing_status="pending",
-    )
-    db.add(book)
-    await db.flush()
-    
-    # Create learning configuration
-    learning_config = LearningConfig(
-        user_id=user_id,
-        book_id=book.id,
-        learning_level=learning_level,
-        study_all_chapters=True,
-        deadline=deadline,
-        daily_study_minutes=daily_minutes,
-        quiz_frequency=quiz_frequency,
-        questions_per_quiz=5,
-        enable_reminders=True,
-    )
-    db.add(learning_config)
-    
+    # Reset status
+    book.processing_status = "ingesting_external"
+    book.processing_error = None
+    book.processing_step = "Re-uploading to document service..."
     await db.commit()
-    await db.refresh(book)
     
-    logger.info(
-        "book_uploaded_with_config",
-        user_id=str(user_id),
-        book_id=str(book.id),
-        total_days=total_days,
-        daily_minutes=daily_minutes,
-        learning_level=learning_level,
-    )
+    # Start new workflow
+    try:
+        await start_document_ingestion_workflow(
+            book_id=book.id,
+            user_id=user_id,
+            file_path=book.file_path,
+            filename=os.path.basename(book.file_path),
+        )
+    except Exception as e:
+        logger.exception("reprocess_workflow_failed", book_id=str(book_id), error=str(e))
+        book.processing_status = "failed"
+        book.processing_error = str(e)
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start reprocessing",
+        )
     
-    # Trigger async processing
-    background_tasks.add_task(process_book_task, book.id)
+    logger.info("book_reprocessing_triggered", book_id=str(book_id))
     
-    return BookUploadResponse(
-        id=book.id,
-        title=book.title,
-        author=book.author,
-        processing_status=book.processing_status,
-        message="Book uploaded! Professor will create your learning plan.",
-    )
-
-
-# ============================================================================
-# LEARNING PLAN ENDPOINT
-# ============================================================================
-
+    return {"message": "Book reprocessing started"}

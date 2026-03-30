@@ -182,13 +182,13 @@ def mark_chapter_complete(state: Dict[str, Any], chapter_number: int) -> Dict[st
     Returns:
         Updated state dict
     """
-    completed = list(state.get("chapters_completed", []))
+    completed = list(state.get("completed_chapters", []))
     
     if chapter_number not in completed:
         completed.append(chapter_number)
         completed.sort()
     
-    state["chapters_completed"] = completed
+    state["completed_chapters"] = completed
     
     # Update motivation for chapter completion
     state = update_motivation_score(state, "chapter_complete")
@@ -255,7 +255,7 @@ def get_progress_summary(state: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Summary dict with formatted values
     """
-    chapters_completed = len(state.get("chapters_completed", []))
+    num_chapters_completed = len(state.get("completed_chapters", []))
     total_chapters = state.get("total_chapters", 1)
     total_minutes = state.get("total_study_time_minutes", 0)
     
@@ -268,9 +268,9 @@ def get_progress_summary(state: Dict[str, Any]) -> Dict[str, Any]:
         time_str = f"{minutes}m"
     
     return {
-        "chapters_completed": chapters_completed,
+        "completed_chapters_count": num_chapters_completed,
         "total_chapters": total_chapters,
-        "completion_percentage": round(chapters_completed / max(total_chapters, 1) * 100, 1),
+        "completion_percentage": round(num_chapters_completed / max(total_chapters, 1) * 100, 1),
         "total_study_time": time_str,
         "total_study_time_minutes": total_minutes,
         "comprehension_score": round(state.get("comprehension_score", 1.0) * 100),
@@ -293,7 +293,7 @@ def format_progress_for_display(state: Dict[str, Any]) -> str:
     
     return (
         f"📊 **Your Progress**\n"
-        f"• Chapters: {summary['chapters_completed']}/{summary['total_chapters']} "
+        f"• Chapters: {summary['completed_chapters_count']}/{summary['total_chapters']} "
         f"({summary['completion_percentage']}%)\n"
         f"• Study Time: {summary['total_study_time']}\n"
         f"• Comprehension: {summary['comprehension_score']}%\n"
@@ -335,7 +335,7 @@ async def persist_progress_to_db(
     if learning_state:
         # Update fields
         learning_state.current_chapter = state.get("current_chapter", learning_state.current_chapter)
-        learning_state.completed_chapters = state.get("chapters_completed", learning_state.completed_chapters)
+        learning_state.completed_chapters = state.get("completed_chapters", learning_state.completed_chapters)
         learning_state.motivation_score = state.get("motivation_score", learning_state.motivation_score)
         learning_state.attention_score = state.get("attention_score", learning_state.attention_score)
         learning_state.comprehension_score = state.get("comprehension_score", learning_state.comprehension_score)

@@ -1,7 +1,7 @@
 """Add learning configuration tables.
 
 Revision ID: 0003_learning_config
-Revises: 20240102_0002_rename_metadata
+Revises: 0002
 Create Date: 2026-01-14
 
 Per Goals.md, these tables store:
@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 
 # revision identifiers, used by Alembic.
 revision = '0003_learning_config'
-down_revision = '20240102_0002_rename_metadata'
+down_revision = '0002'
 branch_labels = None
 depends_on = None
 

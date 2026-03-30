@@ -12,7 +12,6 @@ from app.models.learning import (
 from app.models.learning_config import (
     LearningConfig,
     LearningPlan,
-    ConversationState,
 )
 from app.models.chat import ChatSession, ChatMessage, AgentLog
 from app.models.quiz import (
@@ -46,7 +45,6 @@ __all__ = [
     # Learning config models
     "LearningConfig",
     "LearningPlan",
-    "ConversationState",
     # Chat models
     "ChatSession",
     "ChatMessage",

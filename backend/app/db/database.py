@@ -1,9 +1,9 @@
 """
 Database configuration and session management.
 
-Connection Pooling Strategy:
-- pool_size=20: Base number of persistent connections
-- max_overflow=10: Additional connections under load (total max: 30)
+Connection Pooling Strategy (Gunicorn-aware):
+- pool_size=5: Per-worker base connections (4 workers x 5 = 20 total)
+- max_overflow=3: Per-worker overflow (4 workers x 3 = 12 overflow, 32 max)
 - pool_pre_ping=True: Validates connections before use (prevents stale connections)
 - pool_recycle=1800: Recycle connections every 30 min (prevents timeout issues)
 - pool_timeout=30: Wait max 30s for a connection from pool
@@ -23,8 +23,8 @@ from app.config import settings
 engine = create_async_engine(
     settings.database_url,
     poolclass=AsyncAdaptedQueuePool,
-    pool_size=20,           # Base connections
-    max_overflow=10,        # Extra connections under load
+    pool_size=5,            # Per-worker (4 workers x 5 = 20 total)
+    max_overflow=3,         # Per-worker overflow (4 workers x 3 = 12)
     pool_pre_ping=True,     # Validate connections before use
     pool_recycle=1800,      # Recycle every 30 min
     pool_timeout=30,        # Wait max 30s for connection

@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+/* KaTeX CSS for math formula rendering */
+@import 'katex/dist/katex.min.css';
+
+/* Highlight.js theme for code syntax highlighting - GitHub Dark theme */
+@import 'highlight.js/styles/github-dark.css';
+
 @layer base {
   :root {
     --background: 0 0% 100%;
@@ -131,10 +137,137 @@
   @apply border-l-4 border-blue-400 pl-4 py-2 my-2 bg-blue-50 rounded-r-lg;
 }
 
+.dark .note-block-quote {
+  background: rgba(30, 58, 138, 0.2);
+}
+
 .note-block-code {
   @apply bg-gray-900 text-gray-100 p-4 rounded-lg my-2 overflow-x-auto font-mono text-sm;
 }
 
 .note-block-highlight {
   @apply bg-yellow-200 px-1 rounded;
+}
+
+.dark .note-block-highlight {
+  background: rgba(234, 179, 8, 0.2);
+}
+
+/* ============================================
+   Markdown Content Styling
+   ============================================ */
+
+/* KaTeX math formula styling */
+.markdown-content .katex {
+  font-size: 1.1em;
+}
+
+.markdown-content .katex-display {
+  margin: 1rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5rem 0;
+}
+
+.markdown-content .katex-display > .katex {
+  white-space: normal;
+}
+
+/* Ensure math blocks don't overflow */
+.markdown-content .katex-html {
+  white-space: nowrap;
+}
+
+/* Block math centering */
+.markdown-content .math-display {
+  display: block;
+  text-align: center;
+  margin: 1.5rem 0;
+}
+
+/* Inline math styling */
+.markdown-content .math-inline {
+  padding: 0 0.15em;
+}
+
+/* Code block styling enhancements */
+.markdown-content pre {
+  position: relative;
+}
+
+.markdown-content pre code {
+  display: block;
+  overflow-x: auto;
+  padding: 1rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+/* Inline code styling */
+.markdown-content code:not(pre code) {
+  background-color: rgba(175, 184, 193, 0.2);
+  padding: 0.2em 0.4em;
+  border-radius: 6px;
+  font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+}
+
+/* Table styling */
+.markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid #d0d7de;
+  padding: 0.5rem 1rem;
+}
+
+.markdown-content th {
+  background-color: #f6f8fa;
+  font-weight: 600;
+}
+
+.markdown-content tr:nth-child(even) {
+  background-color: #f6f8fa;
+}
+
+/* Dark mode table styling */
+.dark .markdown-content th,
+.dark .markdown-content td {
+  border-color: #30363d;
+}
+
+.dark .markdown-content th {
+  background-color: #161b22;
+}
+
+.dark .markdown-content tr:nth-child(even) {
+  background-color: #161b22;
+}
+
+/* Task list styling (GFM) */
+.markdown-content input[type="checkbox"] {
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+
+/* Strikethrough styling (GFM) */
+.markdown-content del {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+/* Horizontal rule styling */
+.markdown-content hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(to right, transparent, #d0d7de, transparent);
+  margin: 2rem 0;
+}
+
+.dark .markdown-content hr {
+  background: linear-gradient(to right, transparent, #30363d, transparent);
 }
