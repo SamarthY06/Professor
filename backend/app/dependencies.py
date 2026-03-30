@@ -1,6 +1,6 @@
 """FastAPI dependencies for dependency injection."""
 
-from typing import Optional
+from typing import AsyncGenerator, Optional
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
