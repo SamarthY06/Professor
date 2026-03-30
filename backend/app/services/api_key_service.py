@@ -119,6 +119,10 @@ class APIKeyService:
                 error=str(e),
             )
             return None
+
+    async def get_stored_user_api_key(self, user_id: UUID) -> Optional[str]:
+        """Return decrypted user key if stored and valid; no platform fallback."""
+        return await self._get_user_key(user_id)
     
     async def save_api_key(
         self,

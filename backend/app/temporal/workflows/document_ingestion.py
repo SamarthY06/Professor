@@ -10,7 +10,6 @@ This workflow manages the document ingestion lifecycle:
 Professor never blocks waiting for ingestion - this workflow handles it asynchronously.
 """
 
-import asyncio
 from datetime import timedelta
 from typing import Optional
 
@@ -159,7 +158,7 @@ class TrackDocumentIngestionWorkflow:
                     }
                 
                 # Wait before next poll
-                await asyncio.sleep(poll_interval_seconds)
+                await workflow.sleep(timedelta(seconds=poll_interval_seconds))
                 elapsed_seconds += poll_interval_seconds
             
             # Check for timeout
@@ -387,7 +386,7 @@ class ResumeIngestionTrackingWorkflow:
                     "error": error_msg,
                 }
             
-            await asyncio.sleep(poll_interval_seconds)
+            await workflow.sleep(timedelta(seconds=poll_interval_seconds))
             elapsed_seconds += poll_interval_seconds
         
         return {

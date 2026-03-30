@@ -125,7 +125,7 @@ class QuizAgent(BaseAgent):
         chapter_title = state.get("chapter_title", f"Chapter {chapter_number}")
         topics_covered = state.get("topics_covered_this_chapter", [])
         comprehension_score = state.get("comprehension_score", 0.7)
-        questions_per_quiz = state.get("questions_per_quiz", settings.questions_per_quiz)
+        questions_per_quiz = state.get("questions_per_quiz", settings.quiz_questions_per_quiz)
         book_id = state.get("book_id", "")
         user_id = state.get("user_id", "")
         

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.dependencies import get_current_user_id
 from app.logs.logger import get_logger
-from app.models.usage import UserSubscription, ModelPricing, UserFeedback
+from app.models.usage import UserSubscription, ModelPricing, UserFeedback, UsageLog
 from app.services.usage_service import UsageService
 
 logger = get_logger(__name__)

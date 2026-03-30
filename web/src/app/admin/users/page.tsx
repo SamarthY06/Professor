@@ -1,12 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { 
   Users, BookOpen, Search, ChevronDown, Crown, Key,
   Sparkles, Eye, X, Zap, Brain, Loader2, AlertTriangle
 } from 'lucide-react';
 import AdminLayout, { AdminCard, StatCard, useAdminTheme } from '@/components/admin/AdminLayout';
 import { admin } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface UserWithUsage {
   id: string;
@@ -74,6 +76,8 @@ interface UserDetail {
 }
 
 export default function UsersPage() {
+  const router = useRouter();
+  const { token, isAuthenticated, isLoading: authLoading } = useAuth();
   const [users, setUsers] = useState<UserWithUsage[]>([]);
   const [selectedUser, setSelectedUser] = useState<UserDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -85,16 +89,19 @@ export default function UsersPage() {
   const [page, setPage] = useState(1);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    const token = localStorage.getItem('professor_access_token');
-    if (!token) {
-      window.location.href = '/login?redirect=/admin/users';
-      return;
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.push('/login?redirect=/admin/users');
     }
+  }, [authLoading, isAuthenticated, router]);
+
+  const fetchData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    const t = token || '';
 
     try {
       const usersData = await admin.listUsersWithUsage(
-        token, 
+        t, 
         page, 
         searchQuery || undefined, 
         tierFilter || undefined,
@@ -108,11 +115,13 @@ export default function UsersPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [page, searchQuery, tierFilter, sortBy]);
+  }, [isAuthenticated, token, page, searchQuery, tierFilter, sortBy]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (isAuthenticated) {
+      fetchData();
+    }
+  }, [isAuthenticated, fetchData]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -121,11 +130,11 @@ export default function UsersPage() {
   };
 
   const handleViewUser = async (userId: string) => {
-    const token = localStorage.getItem('professor_access_token');
-    if (!token) return;
+    const t = token || '';
+    if (!t) return;
 
     try {
-      const detail = await admin.getUserUsageDetail(token, userId);
+      const detail = await admin.getUserUsageDetail(t, userId);
       setSelectedUser(detail);
       setShowUserModal(true);
     } catch (err) {

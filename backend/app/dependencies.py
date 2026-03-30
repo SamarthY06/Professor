@@ -1,6 +1,6 @@
 """FastAPI dependencies for dependency injection."""
 
-from typing import AsyncGenerator, Optional
+from typing import Optional
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -9,27 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as redis
 
 from app.config import settings
-from app.db.database import AsyncSessionLocal
+from app.db.database import get_db
 from app.logs.logger import get_logger
 
 logger = get_logger(__name__)
 
 # HTTP Bearer token security
 security = HTTPBearer(auto_error=False)
-
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Get database session."""
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
-
 
 # Redis connection pool
 _redis_pool: Optional[redis.ConnectionPool] = None

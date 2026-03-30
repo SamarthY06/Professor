@@ -72,15 +72,100 @@ services:
     networks:
       - professor_network
 
-  # Temporal worker for executing workflows
+  # Qdrant vector store for RAG
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: professor-qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - professor_network
+
+  # RAG Service — document ingestion and semantic search
+  rag-service:
+    build:
+      context: ./services/rag
+      dockerfile: Dockerfile
+    container_name: professor-rag-service
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
+      - SYNC_DATABASE_URL=postgresql://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - TEMPORAL_HOST=temporal
+      - TEMPORAL_PORT=7233
+      - TEMPORAL_TASK_QUEUE=rag-ingestion-queue
+      - UPLOAD_DIR=/app/uploads
+      - PROCESSED_DIR=/app/processed
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - ./data/rag-uploads:/app/uploads
+      - ./data/rag-processed:/app/processed
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - professor_network
+
+  # RAG Temporal Worker — processes document ingestion workflows
+  rag-worker:
+    build:
+      context: ./services/rag
+      dockerfile: Dockerfile
+    container_name: professor-rag-worker
+    command: ["python", "-m", "temporal_worker.worker"]
+    restart: on-failure:5
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
+      - SYNC_DATABASE_URL=postgresql://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - TEMPORAL_HOST=temporal
+      - TEMPORAL_PORT=7233
+      - TEMPORAL_TASK_QUEUE=rag-ingestion-queue
+      - UPLOAD_DIR=/app/uploads
+      - PROCESSED_DIR=/app/processed
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    volumes:
+      - ./data/rag-uploads:/app/uploads
+      - ./data/rag-processed:/app/processed
+    networks:
+      - professor_network
+
+  # Temporal worker for executing Professor workflows
   temporal-worker:
     build:
       context: ./backend
       dockerfile: Dockerfile.worker
     container_name: professor-temporal-worker
     restart: on-failure:5
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     env_file:
       - ./backend/.env
     environment:
@@ -88,7 +173,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - REDIS_HOST=redis
       - TEMPORAL_HOST=temporal:7233
-      - RAG_BASE_URL=http://host.docker.internal:8001
+      - RAG_BASE_URL=http://rag-service:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,6 +181,8 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      rag-service:
+        condition: service_healthy
     volumes:
       - ./data/pdfs:/app/data/pdfs
       - ./data/logs:/app/data/logs
@@ -125,7 +212,7 @@ services:
       - TEMPORAL_HOST=temporal:7233
       - FRONTEND_URL=http://localhost:3000
       - ENVIRONMENT=development
-      - RAG_BASE_URL=http://host.docker.internal:8001
+      - RAG_BASE_URL=http://rag-service:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,6 +220,8 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      rag-service:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -228,5 +317,6 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  qdrant_data:
   prometheus_data:
   grafana_data:

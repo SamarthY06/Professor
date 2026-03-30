@@ -91,15 +91,31 @@ class Settings(BaseSettings):
     rag_admin_password: str
     rag_request_timeout: int = 30
     rag_poll_interval_seconds: int = 5
-    
-    # Teaching Settings
+    rag_search_limit: int = 6
+    rag_summary_chunks: int = 3
+
+    # Teaching, quiz, and workflow
+    # Teaching thresholds
+    min_messages_before_day_complete: int = 8
+    max_plan_days: int = 90
+    quiz_chapter_interval: int = 1
+
     max_context_tokens: int = 8000
     max_response_tokens: int = 600
     default_temperature: float = 0.7
-    
-    # Quiz Settings
-    questions_per_quiz: int = 5
+
+    # Workflow limits
+    workflow_max_messages_before_continue_as_new: int = 500
+    workflow_conversation_trim_threshold: int = 30
+    workflow_conversation_keep_recent: int = 20
+    workflow_conversation_context_window: int = 10
+    workflow_inactivity_timeout_hours: int = 24
+
+    # Quiz configuration
+    quiz_question_type_weights: str = "0.5,0.25,0.25"
     quiz_passing_score: float = 0.7
+    quiz_max_content_chars: int = 4000
+    quiz_questions_per_quiz: int = 5
     attention_question_min_interval: int = 5
     attention_question_max_interval: int = 12
     attention_question_probability: float = 0.3

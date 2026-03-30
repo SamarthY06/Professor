@@ -31,66 +31,18 @@ from app.prompts.teacher import build_teacher_prompt
 logger = get_logger(__name__)
 
 
-# ============== TOOL CONTEXT ==============
-_tool_context: Dict[str, Any] = {}
-
-
-def set_tool_context(
-    book_id: str,
-    chapter_number: int,
-    chapter_title: str,
-    user_id: str,
-    topics_covered: List[str],
-    day_scope: str = "",
-    current_day: int = 1,
-    day_chapter_numbers: Optional[List[int]] = None,
-    uncovered_topics: Optional[List[str]] = None,
-):
-    """Set context for tools to access."""
-    global _tool_context
-    _tool_context = {
-        "book_id": book_id,
-        "chapter_number": chapter_number,
-        "chapter_title": chapter_title,
-        "user_id": user_id,
-        "topics_covered": topics_covered,
-        "day_scope": day_scope,
-        "current_day": current_day,
-        "day_chapter_numbers": day_chapter_numbers or [chapter_number],
-        "uncovered_topics": uncovered_topics or [],
-    }
-
-
-def get_tool_context() -> Dict[str, Any]:
-    """Get current tool context."""
-    return _tool_context.copy()
-
-
 # ============== TOOLS ==============
+# RAG tools are built per request via make_teacher_tools(ctx) so each invocation
+# closes over a context snapshot (safe under concurrent requests).
 
-@tool
-async def fetch_next_topic(topics_already_covered: str = "") -> str:
-    """
-    Fetch the NEXT topic to teach from the textbook.
-    
-    Call this when:
-    - Student says "proceed", "next", "continue", "move on"
-    - You need NEW content to teach
-    - Starting a new concept
-    
-    Args:
-        topics_already_covered: Summary of topics already taught. Empty if starting fresh.
-    
-    Returns:
-        Content from the textbook for the next topic.
-    """
+
+async def _fetch_next_topic_for_ctx(ctx: Dict[str, Any], topics_already_covered: str = "") -> str:
     from app.integrations.rag_client import get_rag_client
     from app.db.database import async_session_maker
     from app.models.book import Book, BookChapter
     from sqlalchemy import select
     from uuid import UUID
     
-    ctx = _tool_context
     book_id = ctx.get("book_id", "")
     chapter_number = ctx.get("chapter_number", 1)
     chapter_title = ctx.get("chapter_title", "")
@@ -231,29 +183,13 @@ async def fetch_next_topic(topics_already_covered: str = "") -> str:
         return f"Error fetching content: {str(e)}"
 
 
-@tool
-async def answer_from_textbook(question: str) -> str:
-    """
-    Search the textbook to answer a specific question.
-    
-    Call this when:
-    - Student asks a specific question like "what is X?" or "explain Y"
-    - You need to look up a definition or concept
-    - Student asks for clarification on something from the book
-    
-    Args:
-        question: The specific question to answer from the textbook.
-    
-    Returns:
-        Relevant content from the textbook to answer the question.
-    """
+async def _answer_from_textbook_for_ctx(ctx: Dict[str, Any], question: str) -> str:
     from app.integrations.rag_client import get_rag_client
     from app.db.database import async_session_maker
     from app.models.book import Book, BookChapter
     from sqlalchemy import select
     from uuid import UUID
     
-    ctx = _tool_context
     book_id = ctx.get("book_id", "")
     chapter_number = ctx.get("chapter_number", 1)
     chapter_title = ctx.get("chapter_title", "")
@@ -345,6 +281,49 @@ async def answer_from_textbook(question: str) -> str:
         return f"Error searching: {str(e)}"
 
 
+def make_teacher_tools(tool_ctx: Dict[str, Any]) -> List[Any]:
+    """Build LangChain tools that close over a snapshot of request context."""
+    ctx = dict(tool_ctx)
+
+    @tool
+    async def fetch_next_topic(topics_already_covered: str = "") -> str:
+        """
+        Fetch the NEXT topic to teach from the textbook.
+
+        Call this when:
+        - Student says "proceed", "next", "continue", "move on"
+        - You need NEW content to teach
+        - Starting a new concept
+
+        Args:
+            topics_already_covered: Summary of topics already taught. Empty if starting fresh.
+
+        Returns:
+            Content from the textbook for the next topic.
+        """
+        return await _fetch_next_topic_for_ctx(ctx, topics_already_covered)
+
+    @tool
+    async def answer_from_textbook(question: str) -> str:
+        """
+        Search the textbook to answer a specific question.
+
+        Call this when:
+        - Student asks a specific question like "what is X?" or "explain Y"
+        - You need to look up a definition or concept
+        - Student asks for clarification on something from the book
+
+        Args:
+            question: The specific question to answer from the textbook.
+
+        Returns:
+            Relevant content from the textbook to answer the question.
+        """
+        return await _answer_from_textbook_for_ctx(ctx, question)
+
+    return [fetch_next_topic, answer_from_textbook]
+
+
 # ============== STATE ==============
 
 class TeacherState(MessagesState):
@@ -361,14 +340,9 @@ class TeacherState(MessagesState):
     scope_section: str = ""  # Built from plan_data at runtime
 
 
-# ============== TOOLS LIST ==============
-
-TEACHER_TOOLS = [fetch_next_topic, answer_from_textbook]
-
-
 # ============== CREATE AGENT ==============
 
-def create_teacher_agent():
+def create_teacher_agent(tools: List[Any]):
     """Create the Teacher Agent using StateGraph pattern."""
     llm = ChatOpenAI(
         model=settings.openai_model,
@@ -377,7 +351,7 @@ def create_teacher_agent():
         streaming=True,
     )
     
-    llm_with_tools = llm.bind_tools(TEACHER_TOOLS)
+    llm_with_tools = llm.bind_tools(tools)
     
     def agent_node(state: TeacherState) -> dict:
         """Main agent reasoning node."""
@@ -413,16 +387,13 @@ def create_teacher_agent():
     
     workflow = StateGraph(TeacherState)
     workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", ToolNode(TEACHER_TOOLS))
+    workflow.add_node("tools", ToolNode(tools))
     
     workflow.add_edge(START, "agent")
     workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
     workflow.add_edge("tools", "agent")
     
     return workflow.compile()
-
-
-teacher_agent = create_teacher_agent()
 
 
 # ============== RESPONSE ==============
@@ -995,17 +966,19 @@ async def teach_with_context(
     planned_topics = _get_all_topics_for_day(plan_data, current_day)
     uncovered_topics = [t for t in planned_topics if t not in topics_covered]
     
-    set_tool_context(
-        book_id=book_id,
-        chapter_number=chapter_number,
-        chapter_title=chapter_title,
-        user_id=user_id,
-        topics_covered=topics_covered,
-        day_scope=day_scope,
-        current_day=current_day,
-        day_chapter_numbers=day_chapter_numbers,
-        uncovered_topics=uncovered_topics,
-    )
+    tool_ctx = {
+        "book_id": book_id,
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "user_id": user_id,
+        "topics_covered": topics_covered,
+        "day_scope": day_scope,
+        "current_day": current_day,
+        "day_chapter_numbers": day_chapter_numbers or [chapter_number],
+        "uncovered_topics": uncovered_topics or [],
+    }
+    teacher_tools = make_teacher_tools(tool_ctx)
+    agent = create_teacher_agent(teacher_tools)
     
     # Build multi-chapter context for days that span multiple chapters
     multi_chapter_note = ""
@@ -1058,7 +1031,7 @@ async def teach_with_context(
     response_text = ""
     
     try:
-        result = await teacher_agent.ainvoke(input_state)
+        result = await agent.ainvoke(input_state)
         messages = result.get("messages", [])
         
         for msg in messages:

@@ -2,7 +2,7 @@
 PlannerAgent - LangGraph Agentic Config Gathering & Plan Generation.
 
 Architecture (follows eon-langgraph patterns):
-    - ConfigGathering: StateGraph agent with @tool for save_learning_config
+    - ConfigGathering: StateGraph agent with save_learning_config tool (per-invocation sink)
         - Agent node: LLM with tools bound → autonomous decision-making
         - Tools node: ToolNode executes when LLM decides to call tools
         - Routing: should_continue checks tool_calls → tools or END
@@ -71,138 +71,120 @@ class LearningPlanSchema(BaseModel):
 
 
 # =============================================================================
-# TOOL CONTEXT — per-request state for tool ↔ agent communication
-#
-# Why a plain dict and not contextvars.ContextVar:
-# The save_learning_config tool is a *synchronous* function executed by
-# LangGraph's ToolNode.  ToolNode may run tools in a thread-pool, which
-# gets its own contextvars context — so a ContextVar set inside the tool
-# is invisible to the async caller.  A module-level dict is the simplest
-# correct approach because the entire config-gathering flow is serialised
-# per-user (Temporal ensures one message at a time per workflow).
-# =============================================================================
-
-_planner_context: Dict[str, Any] = {}
-
-
-def _set_planner_context(**kwargs):
-    _planner_context.update(kwargs)
-
-
-def _get_planner_context() -> Dict[str, Any]:
-    return _planner_context.copy()
-
-
-# =============================================================================
 # TOOLS — LLM decides when to call these
+#
+# config_sink: per agent invocation, closed over by the tool so the async
+# caller reads gathered config without module-level mutable state.
 # =============================================================================
 
-@tool("save_learning_config")
-def save_learning_config(
-    learning_level: str,
-    target_days: int,
-    daily_minutes: int,
-    quiz_frequency: str,
-    professor_level: str = "mtech",
-) -> str:
-    """Save the student's learning preferences and create their learning plan.
 
-    Call this tool when you have gathered ALL of the student's preferences
-    through conversation. You need:
-    - learning_level: their experience ("beginner", "intermediate", or "advanced")
-    - target_days: how many days they want to finish in (any positive number)
-    - daily_minutes: how many minutes per day they can study
-    - quiz_frequency: how often to quiz ("after_each_chapter", "after_2_chapters", or "final_only")
-    - professor_level: teaching depth they chose ("undergrad", "mtech", or "phd")
+def _make_config_gathering_tools(config_sink: Dict[str, Any]):
+    @tool("save_learning_config")
+    def save_learning_config(
+        learning_level: str,
+        target_days: int,
+        daily_minutes: int,
+        quiz_frequency: str,
+        professor_level: str = "mtech",
+    ) -> str:
+        """Save the student's learning preferences and create their learning plan.
 
-    Args:
-        learning_level: One of 'beginner', 'intermediate', 'advanced'
-        target_days: Number of days to complete (1-365)
-        daily_minutes: Minutes per day for study (10-480)
-        quiz_frequency: One of 'after_each_chapter', 'after_2_chapters', 'final_only'
-        professor_level: One of 'undergrad', 'mtech', 'phd'
+        Call this tool when you have gathered ALL of the student's preferences
+        through conversation. You need:
+        - learning_level: their experience ("beginner", "intermediate", or "advanced")
+        - target_days: how many days they want to finish in (any positive number)
+        - daily_minutes: how many minutes per day they can study
+        - quiz_frequency: how often to quiz ("after_each_chapter", "after_2_chapters", or "final_only")
+        - professor_level: teaching depth they chose ("undergrad", "mtech", or "phd")
 
-    Returns:
-        Confirmation message
-    """
-    # Normalize learning_level
-    level_map = {"new": "beginner", "basic": "beginner", "expert": "advanced"}
-    learning_level = level_map.get(learning_level.lower(), learning_level.lower())
-    if learning_level not in ("beginner", "intermediate", "advanced"):
-        learning_level = "intermediate"
+        Args:
+            learning_level: One of 'beginner', 'intermediate', 'advanced'
+            target_days: Number of days to complete (1-365)
+            daily_minutes: Minutes per day for study (10-480)
+            quiz_frequency: One of 'after_each_chapter', 'after_2_chapters', 'final_only'
+            professor_level: One of 'undergrad', 'mtech', 'phd'
 
-    # Normalize professor_level
-    prof_map = {
-        "undergraduate": "undergrad", "friendly": "undergrad", "intuitive": "undergrad",
-        "balanced": "mtech", "thorough": "mtech", "master": "mtech", "masters": "mtech",
-        "deep": "phd", "rigorous": "phd", "research": "phd",
-        "intermediate": "mtech",
-    }
-    professor_level = prof_map.get(professor_level.lower(), professor_level.lower())
-    if professor_level not in ("undergrad", "mtech", "phd"):
-        professor_level = "mtech"
+        Returns:
+            Confirmation message
+        """
+        # Normalize learning_level
+        level_map = {"new": "beginner", "basic": "beginner", "expert": "advanced"}
+        learning_level = level_map.get(learning_level.lower(), learning_level.lower())
+        if learning_level not in ("beginner", "intermediate", "advanced"):
+            learning_level = "intermediate"
 
-    # Normalize quiz_frequency
-    freq_map = {
-        "each chapter": "after_each_chapter", "every chapter": "after_each_chapter",
-        "every 2 chapters": "after_2_chapters", "final only": "final_only",
-        "at the end": "final_only",
-    }
-    quiz_frequency = freq_map.get(quiz_frequency.lower(), quiz_frequency.lower())
-    if quiz_frequency not in ("after_each_chapter", "after_2_chapters", "final_only"):
-        quiz_frequency = "after_each_chapter"
+        # Normalize professor_level
+        prof_map = {
+            "undergraduate": "undergrad", "friendly": "undergrad", "intuitive": "undergrad",
+            "balanced": "mtech", "thorough": "mtech", "master": "mtech", "masters": "mtech",
+            "deep": "phd", "rigorous": "phd", "research": "phd",
+            "intermediate": "mtech",
+        }
+        professor_level = prof_map.get(professor_level.lower(), professor_level.lower())
+        if professor_level not in ("undergrad", "mtech", "phd"):
+            professor_level = "mtech"
 
-    target_days = max(1, min(target_days, 365))
-    daily_minutes = max(10, min(daily_minutes, 480))
+        # Normalize quiz_frequency
+        freq_map = {
+            "each chapter": "after_each_chapter", "every chapter": "after_each_chapter",
+            "every 2 chapters": "after_2_chapters", "final only": "final_only",
+            "at the end": "final_only",
+        }
+        quiz_frequency = freq_map.get(quiz_frequency.lower(), quiz_frequency.lower())
+        if quiz_frequency not in ("after_each_chapter", "after_2_chapters", "final_only"):
+            quiz_frequency = "after_each_chapter"
 
-    config = {
-        "learning_level": learning_level,
-        "professor_level": professor_level,
-        "target_days": target_days,
-        "daily_minutes": daily_minutes,
-        "quiz_frequency": quiz_frequency,
-    }
+        target_days = max(1, min(target_days, 365))
+        daily_minutes = max(10, min(daily_minutes, 480))
 
-    _set_planner_context(config=config)
+        config = {
+            "learning_level": learning_level,
+            "professor_level": professor_level,
+            "target_days": target_days,
+            "daily_minutes": daily_minutes,
+            "quiz_frequency": quiz_frequency,
+        }
 
-    professor_display = {
-        "undergrad": "Friendly & Intuitive",
-        "mtech": "Balanced & Thorough",
-        "phd": "Deep & Rigorous",
-    }.get(professor_level, professor_level)
+        config_sink["config"] = config
 
-    logger.info("learning_config_saved_via_tool", config=config)
+        professor_display = {
+            "undergrad": "Friendly & Intuitive",
+            "mtech": "Balanced & Thorough",
+            "phd": "Deep & Rigorous",
+        }.get(professor_level, professor_level)
 
-    return (
-        f"Configuration saved!\n"
-        f"- Level: {learning_level}\n"
-        f"- Style: {professor_display}\n"
-        f"- Timeline: {target_days} days, {daily_minutes} min/day\n"
-        f"- Quizzes: {quiz_frequency.replace('_', ' ')}\n\n"
-        f"Generating your personalized learning plan now..."
-    )
+        logger.info("learning_config_saved_via_tool", config=config)
 
+        return (
+            f"Configuration saved!\n"
+            f"- Level: {learning_level}\n"
+            f"- Style: {professor_display}\n"
+            f"- Timeline: {target_days} days, {daily_minutes} min/day\n"
+            f"- Quizzes: {quiz_frequency.replace('_', ' ')}\n\n"
+            f"Generating your personalized learning plan now..."
+        )
 
-CONFIG_TOOLS = [save_learning_config]
+    return [save_learning_config]
 
 
 # =============================================================================
 # CONFIG GATHERING AGENT — LangGraph StateGraph (eon-langgraph pattern)
 # =============================================================================
 
-def _create_config_agent(api_key: str, system_prompt: str):
+def _create_config_agent(api_key: str, system_prompt: str, config_sink: Dict[str, Any]):
     """Create a LangGraph agent for config gathering.
 
     Pattern: agent → should_continue → (tools → agent) | END
     The LLM autonomously decides when to call save_learning_config.
     """
+    tools = _make_config_gathering_tools(config_sink)
     llm = ChatOpenAI(
         model=settings.openai_model,
         api_key=api_key,
         temperature=0.6,
         streaming=False,
     )
-    llm_with_tools = llm.bind_tools(CONFIG_TOOLS)
+    llm_with_tools = llm.bind_tools(tools)
 
     async def agent_node(state: MessagesState):
         """Agent node — LLM reasons over messages and decides action."""
@@ -221,7 +203,7 @@ def _create_config_agent(api_key: str, system_prompt: str):
 
     workflow = StateGraph(MessagesState)
     workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", ToolNode(CONFIG_TOOLS))
+    workflow.add_node("tools", ToolNode(tools))
     workflow.set_entry_point("agent")
     workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": END})
     workflow.add_edge("tools", "agent")
@@ -252,14 +234,7 @@ async def gather_config_conversationally(
     Returns:
         {"response": str, "config_complete": bool, "config": dict | None}
     """
-    # Reset tool context for this turn
-    _planner_context.clear()
-    _planner_context.update({
-        "book_id": book_id,
-        "book_title": book_title,
-        "user_id": user_id,
-        "total_chapters": total_chapters,
-    })
+    config_sink: Dict[str, Any] = {}
 
     effective_key = api_key or settings.openai_api_key
 
@@ -281,7 +256,7 @@ async def gather_config_conversationally(
     messages.append(HumanMessage(content=user_message))
 
     # Create and invoke the agent
-    agent = _create_config_agent(effective_key, system_prompt)
+    agent = _create_config_agent(effective_key, system_prompt, config_sink)
 
     logger.info(
         "config_agent_invoked",
@@ -303,8 +278,7 @@ async def gather_config_conversationally(
         response_text = "Let me set up your learning plan!"
 
     # Check if the tool was called (agent decided config is complete)
-    ctx = _get_planner_context()
-    config = ctx.get("config")
+    config = config_sink.get("config")
 
     logger.info(
         "config_agent_result",
@@ -334,21 +308,13 @@ async def start_config_conversation(
     Called by the init endpoint when a brand-new session is created.
     Uses the same LangGraph agent to produce the first message.
     """
-    _planner_context.clear()
-    _planner_context.update({
-        "book_id": book_id,
-        "book_title": book_title,
-        "user_id": user_id,
-        "total_chapters": total_chapters,
-    })
-
     effective_key = settings.openai_api_key
     system_prompt = PLANNER_CONFIG_SYSTEM_PROMPT.format(
         book_title=book_title,
         total_chapters=total_chapters,
     )
 
-    agent = _create_config_agent(effective_key, system_prompt)
+    agent = _create_config_agent(effective_key, system_prompt, {})
 
     try:
         result = await agent.ainvoke({

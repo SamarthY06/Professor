@@ -5,7 +5,7 @@ Key Changes from Original:
 1. Removed doubt_resolution phase (handled inline by TeacherAgent)
 2. Removed plan_iteration phase (handled by PlannerAgent)
 3. Added active_agent field to track which agent is in control
-4. Added paused phase for session breaks
+4. Added paused phase for session breaks; break / day_transition for agent-driven flow
 5. Simplified quiz state management
 """
 
@@ -22,9 +22,29 @@ Phase = Literal[
     "quiz_feedback",         # Quiz complete, waiting for retry/proceed decision
     "chapter_transition",    # Moving to next chapter
     "awaiting_chapter_start",# Ready to begin the next chapter
+    "day_transition",        # Moving to the next study day (TeacherAgent decision)
+    "break",                 # User requested a break (TeacherAgent decision)
     "completed",             # All chapters done
     "paused",                # User paused the session
     "error"                  # Error state
+]
+
+
+# API / graph response classification (must match nodes in graph.py)
+ResponseType = Literal[
+    "greeting",
+    "config_gathering",
+    "teaching",
+    "quiz_question",
+    "quiz_result",
+    "plan",
+    "transition",
+    "chapter_transition",
+    "chapter_start",
+    "day_transition",
+    "break",
+    "completion",
+    "error",
 ]
 
 # Which agent is currently in control
@@ -61,7 +81,7 @@ class ProfessorState(TypedDict, total=False):
     
     # ==================== PROFESSOR OUTPUT ====================
     professor_response: str
-    response_type: Literal["greeting", "teaching", "quiz_question", "quiz_result", "plan", "transition", "completion"]
+    response_type: ResponseType
     agent_name: str  # For display: "Professor", "Planner", "Quiz Master"
     
     # ==================== CHAPTER & DAY STATE ====================
@@ -104,6 +124,25 @@ class ProfessorState(TypedDict, total=False):
     quiz_frequency: str          # after_each_chapter, after_n_chapters, final_only
     questions_per_quiz: int
     professor_style: str         # strict, balanced, encouraging (deprecated, use professor_level)
+    # Gathered during config_gathering (mirrors pending_config / tool output; optional until set)
+    target_days: int
+    daily_minutes: int
+    learning_config: Optional[Dict[str, Any]]  # Full config dict when gathering completes
+
+    # ==================== CONVERSATION (persisted / workflow context) ====================
+    conversation_history: List[Dict[str, Any]]  # role, content; may include timestamp
+    config_conversation_history: List[Dict[str, Any]]  # config-gathering thread (often role/content str)
+
+    # ==================== PLAN METADATA ====================
+    chapter_titles: List[str]
+
+    # ==================== TEACHER RUNTIME CONTEXT ====================
+    scope_status: Dict[str, Any]  # From get_scope_status_for_response (day scope snapshot)
+    system_hint: Optional[str]    # Injected instruction for the teacher turn
+    previous_day_summary: Optional[str]
+    cumulative_summary: Optional[str]
+    day_chapters_description: Optional[str]  # When multiple chapters map to one day
+    day_chapter_numbers: List[int]
     
     # ==================== METRICS ====================
     comprehension_score: float   # 0-1, updated after quizzes

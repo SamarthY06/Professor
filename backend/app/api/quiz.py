@@ -33,7 +33,7 @@ class QuizResponse(BaseModel):
         from_attributes = True
 
 
-class QuestionResponse(BaseModel):
+class QuestionResponseSchema(BaseModel):
     """Question response model."""
     id: UUID
     question_text: str
@@ -57,7 +57,7 @@ class AnswerFeedback(BaseModel):
     is_correct: bool
     correct_answer: str
     explanation: Optional[str]
-    next_question: Optional[QuestionResponse]
+    next_question: Optional[QuestionResponseSchema]
     quiz_complete: bool
     score: Optional[float]
     passed: Optional[bool]
@@ -97,7 +97,7 @@ async def get_chapter_quizzes(
     return quizzes
 
 
-@router.post("/start/{quiz_id}", response_model=QuestionResponse)
+@router.post("/start/{quiz_id}", response_model=QuestionResponseSchema)
 async def start_quiz(
     quiz_id: UUID,
     user_id: UUID = Depends(get_current_user_id),
@@ -163,7 +163,7 @@ async def start_quiz(
         attempt_id=str(attempt.id),
     )
     
-    return QuestionResponse(
+    return QuestionResponseSchema(
         id=question.id,
         question_text=question.question_text,
         question_type=question.question_type,
@@ -281,7 +281,7 @@ async def submit_answer(
         next_q = result.scalar_one_or_none()
         
         if next_q:
-            next_question = QuestionResponse(
+            next_question = QuestionResponseSchema(
                 id=next_q.id,
                 question_text=next_q.question_text,
                 question_type=next_q.question_type,

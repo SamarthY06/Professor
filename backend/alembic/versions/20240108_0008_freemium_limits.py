@@ -26,7 +26,12 @@ def upgrade() -> None:
         op.drop_column('user_subscriptions', 'max_books')
     except:
         pass
-    
+
+    op.add_column(
+        'user_subscriptions',
+        sa.Column('max_plan_days', sa.Integer(), nullable=True),
+    )
+
     # Update limits based on tier
     op.execute("UPDATE user_subscriptions SET monthly_book_limit = 2 WHERE tier = 'free'")
     op.execute("UPDATE user_subscriptions SET monthly_book_limit = -1 WHERE tier = 'byok'")
@@ -37,5 +42,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_column('user_subscriptions', 'max_plan_days')
     op.execute("ALTER TABLE user_subscriptions RENAME COLUMN books_used_this_month TO pdfs_used_this_month")
     op.execute("ALTER TABLE user_subscriptions RENAME COLUMN monthly_book_limit TO monthly_pdf_limit")

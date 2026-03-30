@@ -561,10 +561,7 @@ function BookCard({ book, onDelete, onReprocess }: { book: Book; onDelete: (id: 
 
 function GoalCard({ goal }: { goal: Goal }) {
   return (
-    <Link
-      href={`/learn/goal-${goal.id}`}
-      className="bg-white dark:bg-gray-800 rounded-xl p-6 border dark:border-gray-700 hover:border-blue-200 dark:hover:border-blue-700 hover:shadow-md transition group"
-    >
+    <div className="bg-white dark:bg-gray-800 rounded-xl p-6 border dark:border-gray-700">
       <div className="flex items-start justify-between">
         <div className="flex-1">
           <div className="flex items-center gap-2 mb-2">
@@ -578,7 +575,7 @@ function GoalCard({ goal }: { goal: Goal }) {
               {goal.status}
             </span>
           </div>
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 group-hover:text-blue-600 transition">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
             {goal.title}
           </h3>
           {goal.description && (
@@ -589,9 +586,8 @@ function GoalCard({ goal }: { goal: Goal }) {
             <span>Created {new Date(goal.created_at).toLocaleDateString()}</span>
           </div>
         </div>
-        <ChevronRight className="h-5 w-5 text-gray-400 dark:text-gray-500 group-hover:text-blue-600 transition" />
       </div>
-    </Link>
+    </div>
   )
 }
 

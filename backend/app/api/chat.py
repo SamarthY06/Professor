@@ -1323,6 +1323,7 @@ async def _update_learning_state(
     if "total_study_time_minutes" in new_state:
         learning_state.total_study_time_minutes = new_state["total_study_time_minutes"]
     
+    phase = new_state.get("phase", "teaching")
     plan_data = new_state.get("plan_data")
     if plan_data and _has_real_plan(plan_data):
         learning_state.learning_plan = plan_data
@@ -1338,8 +1339,6 @@ async def _update_learning_state(
         learning_state.pending_topics = new_state["topics_covered_this_chapter"]
     
     # Update phase tracking
-    phase = new_state.get("phase", "teaching")
-    
     # Update current_phase field (new field)
     if hasattr(learning_state, 'current_phase'):
         learning_state.current_phase = phase

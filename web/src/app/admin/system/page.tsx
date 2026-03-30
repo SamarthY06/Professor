@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { 
   Cpu, HardDrive, Wifi, Monitor, Brain, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, Play, Pause,
@@ -8,6 +9,7 @@ import {
 } from 'lucide-react';
 import AdminLayout, { AdminCard, useAdminTheme } from '@/components/admin/AdminLayout';
 import { admin } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface ServerMetrics {
   timestamp: string;
@@ -109,6 +111,8 @@ interface ModelPricing {
 }
 
 export default function SystemPage() {
+  const router = useRouter();
+  const { token, isAuthenticated, isLoading: authLoading } = useAuth();
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
   const [modelPricing, setModelPricing] = useState<ModelPricing[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -117,17 +121,20 @@ export default function SystemPage() {
   const [syncingPricing, setSyncingPricing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    const token = localStorage.getItem('professor_access_token');
-    if (!token) {
-      window.location.href = '/login?redirect=/admin/system';
-      return;
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.push('/login?redirect=/admin/system');
     }
+  }, [authLoading, isAuthenticated, router]);
+
+  const fetchData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    const t = token || '';
 
     try {
       const [metricsData, pricingData] = await Promise.all([
-        admin.getDetailedServerMetrics(token),
-        admin.listModelPricing(token),
+        admin.getDetailedServerMetrics(t),
+        admin.listModelPricing(t),
       ]);
 
       setMetrics(metricsData);
@@ -139,11 +146,13 @@ export default function SystemPage() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [isAuthenticated, token]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (isAuthenticated) {
+      fetchData();
+    }
+  }, [isAuthenticated, fetchData]);
 
   // Auto-refresh every 5 seconds
   useEffect(() => {
@@ -163,12 +172,12 @@ export default function SystemPage() {
   };
 
   const handleSyncPricing = async () => {
-    const token = localStorage.getItem('professor_access_token');
-    if (!token) return;
+    const t = token || '';
+    if (!t) return;
 
     setSyncingPricing(true);
     try {
-      const result = await admin.triggerPricingSync(token);
+      const result = await admin.triggerPricingSync(t);
       console.log('Pricing sync result:', result);
       await fetchData();
     } catch (err) {

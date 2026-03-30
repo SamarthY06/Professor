@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { 
   BookOpen, Search, CheckCircle, XCircle,
   AlertTriangle, Loader2, Clock, TrendingUp, Brain,
@@ -8,6 +9,7 @@ import {
 } from 'lucide-react';
 import AdminLayout, { AdminCard, StatCard, useAdminTheme } from '@/components/admin/AdminLayout';
 import { admin } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface Book {
   id: string;
@@ -35,6 +37,8 @@ interface BooksAnalytics {
 }
 
 export default function BooksAdminPage() {
+  const router = useRouter();
+  const { token, isAuthenticated, isLoading: authLoading } = useAuth();
   const [analytics, setAnalytics] = useState<BooksAnalytics | null>(null);
   const [books, setBooks] = useState<Book[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -44,17 +48,20 @@ export default function BooksAdminPage() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const fetchData = useCallback(async () => {
-    const token = localStorage.getItem('professor_access_token');
-    if (!token) {
-      window.location.href = '/login?redirect=/admin/books';
-      return;
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.push('/login?redirect=/admin/books');
     }
+  }, [authLoading, isAuthenticated, router]);
+
+  const fetchData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    const t = token || '';
 
     try {
       const [analyticsData, booksData] = await Promise.all([
-        admin.getBooksAnalytics(token, 30),
-        admin.listBooks(token, page, undefined, statusFilter || undefined),
+        admin.getBooksAnalytics(t, 30),
+        admin.listBooks(t, page, undefined, statusFilter || undefined),
       ]);
       setAnalytics(analyticsData);
       setBooks(booksData);
@@ -65,11 +72,13 @@ export default function BooksAdminPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [page, statusFilter]);
+  }, [isAuthenticated, token, page, statusFilter]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (isAuthenticated) {
+      fetchData();
+    }
+  }, [isAuthenticated, fetchData]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);

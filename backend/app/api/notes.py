@@ -88,6 +88,82 @@ async def list_notes(
     return notes
 
 
+@router.get("/export/{format}")
+async def export_notes(
+    format: str,
+    book_id: Optional[UUID] = None,
+    user_id: UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export notes in various formats (json, markdown, txt)."""
+    from fastapi.responses import Response
+    import json
+
+    conditions = [UserNote.user_id == user_id]
+    if book_id:
+        conditions.append(UserNote.book_id == book_id)
+
+    result = await db.execute(
+        select(UserNote)
+        .where(and_(*conditions))
+        .order_by(UserNote.created_at.desc())
+    )
+    notes = result.scalars().all()
+
+    if format == "json":
+        export_data = [
+            {
+                "title": note.title,
+                "content": note.content,
+                "tags": note.tags or [],
+                "created_at": note.created_at.isoformat(),
+                "is_pinned": note.is_pinned,
+            }
+            for note in notes
+        ]
+        return Response(
+            content=json.dumps(export_data, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=notes.json"},
+        )
+
+    elif format == "markdown":
+        md_content = "# My Learning Notes\n\n"
+        for note in notes:
+            md_content += f"## {note.title or 'Untitled'}\n\n"
+            md_content += f"{note.content}\n\n"
+            if note.tags:
+                md_content += f"Tags: {', '.join(note.tags)}\n\n"
+            md_content += f"*Created: {note.created_at.strftime('%Y-%m-%d %H:%M')}*\n\n---\n\n"
+
+        return Response(
+            content=md_content,
+            media_type="text/markdown",
+            headers={"Content-Disposition": "attachment; filename=notes.md"},
+        )
+
+    elif format == "txt":
+        txt_content = "MY LEARNING NOTES\n" + "=" * 50 + "\n\n"
+        for note in notes:
+            txt_content += f"TITLE: {note.title or 'Untitled'}\n"
+            txt_content += f"DATE: {note.created_at.strftime('%Y-%m-%d %H:%M')}\n"
+            txt_content += "-" * 30 + "\n"
+            txt_content += f"{note.content}\n"
+            txt_content += "\n" + "=" * 50 + "\n\n"
+
+        return Response(
+            content=txt_content,
+            media_type="text/plain",
+            headers={"Content-Disposition": "attachment; filename=notes.txt"},
+        )
+
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid format. Use: json, markdown, or txt",
+        )
+
+
 @router.get("/{note_id}", response_model=NoteResponse)
 async def get_note(
     note_id: UUID,
@@ -224,79 +300,3 @@ async def toggle_pin(
     await db.commit()
     
     return {"is_pinned": note.is_pinned}
-
-
-@router.get("/export/{format}")
-async def export_notes(
-    format: str,
-    book_id: Optional[UUID] = None,
-    user_id: UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
-    """Export notes in various formats (json, markdown, txt)."""
-    from fastapi.responses import Response
-    import json
-    
-    conditions = [UserNote.user_id == user_id]
-    if book_id:
-        conditions.append(UserNote.book_id == book_id)
-    
-    result = await db.execute(
-        select(UserNote)
-        .where(and_(*conditions))
-        .order_by(UserNote.created_at.desc())
-    )
-    notes = result.scalars().all()
-    
-    if format == "json":
-        export_data = [
-            {
-                "title": note.title,
-                "content": note.content,
-                "tags": note.tags or [],
-                "created_at": note.created_at.isoformat(),
-                "is_pinned": note.is_pinned,
-            }
-            for note in notes
-        ]
-        return Response(
-            content=json.dumps(export_data, indent=2),
-            media_type="application/json",
-            headers={"Content-Disposition": "attachment; filename=notes.json"}
-        )
-    
-    elif format == "markdown":
-        md_content = "# My Learning Notes\n\n"
-        for note in notes:
-            md_content += f"## {note.title or 'Untitled'}\n\n"
-            md_content += f"{note.content}\n\n"
-            if note.tags:
-                md_content += f"Tags: {', '.join(note.tags)}\n\n"
-            md_content += f"*Created: {note.created_at.strftime('%Y-%m-%d %H:%M')}*\n\n---\n\n"
-        
-        return Response(
-            content=md_content,
-            media_type="text/markdown",
-            headers={"Content-Disposition": "attachment; filename=notes.md"}
-        )
-    
-    elif format == "txt":
-        txt_content = "MY LEARNING NOTES\n" + "=" * 50 + "\n\n"
-        for note in notes:
-            txt_content += f"TITLE: {note.title or 'Untitled'}\n"
-            txt_content += f"DATE: {note.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-            txt_content += "-" * 30 + "\n"
-            txt_content += f"{note.content}\n"
-            txt_content += "\n" + "=" * 50 + "\n\n"
-        
-        return Response(
-            content=txt_content,
-            media_type="text/plain",
-            headers={"Content-Disposition": "attachment; filename=notes.txt"}
-        )
-    
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid format. Use: json, markdown, or txt"
-        )

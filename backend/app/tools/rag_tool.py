@@ -308,7 +308,7 @@ async def get_rag_tool_for_session(
     """
     from app.db.database import async_session_maker
     from app.models.book import Book, BookChapter
-    from app.models.user import EncryptedAPIKey
+    from app.services.api_key_service import APIKeyService
     from sqlalchemy import select
     
     try:
@@ -344,16 +344,10 @@ async def get_rag_tool_for_session(
             # Get user's BYOK key if not provided
             user_openai_key = openai_key
             if not user_openai_key and user_id:
-                key_result = await db.execute(
-                    select(EncryptedAPIKey).where(
-                        EncryptedAPIKey.user_id == UUID(user_id),
-                        EncryptedAPIKey.is_valid == True
-                    )
+                key_service = APIKeyService(db)
+                user_openai_key = await key_service.get_stored_user_api_key(
+                    UUID(user_id)
                 )
-                api_key_record = key_result.scalar_one_or_none()
-                if api_key_record:
-                    # Decrypt the key
-                    user_openai_key = api_key_record.decrypt_key()
             
             return RAGTool(
                 book_id=book_id,

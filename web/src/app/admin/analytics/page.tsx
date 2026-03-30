@@ -1,12 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { 
   DollarSign, TrendingUp, Brain, Zap, ChevronDown,
   FileText, MessageSquare, HelpCircle, BookOpen, Loader2, AlertTriangle
 } from 'lucide-react';
 import AdminLayout, { AdminCard, StatCard, useAdminTheme } from '@/components/admin/AdminLayout';
 import { admin } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface CostsBreakdown {
   period_days: number;
@@ -62,6 +64,8 @@ interface UsageTimelinePoint {
 }
 
 export default function AnalyticsPage() {
+  const router = useRouter();
+  const { token, isAuthenticated, isLoading: authLoading } = useAuth();
   const [costs, setCosts] = useState<CostsBreakdown | null>(null);
   const [books, setBooks] = useState<BooksAnalytics | null>(null);
   const [quizzes, setQuizzes] = useState<QuizAnalytics | null>(null);
@@ -71,19 +75,22 @@ export default function AnalyticsPage() {
   const [selectedPeriod, setSelectedPeriod] = useState(30);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    const token = localStorage.getItem('professor_access_token');
-    if (!token) {
-      window.location.href = '/login?redirect=/admin/analytics';
-      return;
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.push('/login?redirect=/admin/analytics');
     }
+  }, [authLoading, isAuthenticated, router]);
+
+  const fetchData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    const t = token || '';
 
     try {
       const [costsData, booksData, quizzesData, timelineData] = await Promise.all([
-        admin.getCostsBreakdown(token, selectedPeriod),
-        admin.getBooksAnalytics(token, selectedPeriod),
-        admin.getQuizAnalytics(token, selectedPeriod),
-        admin.getUsageTimeline(token, selectedPeriod),
+        admin.getCostsBreakdown(t, selectedPeriod),
+        admin.getBooksAnalytics(t, selectedPeriod),
+        admin.getQuizAnalytics(t, selectedPeriod),
+        admin.getUsageTimeline(t, selectedPeriod),
       ]);
 
       setCosts(costsData);
@@ -97,11 +104,13 @@ export default function AnalyticsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedPeriod]);
+  }, [isAuthenticated, token, selectedPeriod]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (isAuthenticated) {
+      fetchData();
+    }
+  }, [isAuthenticated, fetchData]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
