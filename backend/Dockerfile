@@ -16,8 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create data directories
-RUN mkdir -p /app/data/pdfs /app/data/logs /app/data/cache
+# Create data directories and non-root user (useradd before chown)
+RUN useradd -r -s /bin/false appuser
+RUN mkdir -p /app/data/pdfs /app/data/logs /app/data/cache && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 

@@ -24,7 +24,7 @@ def create_access_token(subject: str, expires_delta: Optional[timedelta] = None)
     
     encoded_jwt = jwt.encode(
         to_encode,
-        settings.secret_key,
+        settings.effective_jwt_secret,
         algorithm=settings.algorithm,
     )
     
@@ -47,7 +47,7 @@ def create_refresh_token(subject: str, expires_delta: Optional[timedelta] = None
     
     encoded_jwt = jwt.encode(
         to_encode,
-        settings.secret_key,
+        settings.effective_jwt_secret,
         algorithm=settings.algorithm,
     )
     
@@ -59,7 +59,7 @@ def verify_access_token(token: str) -> Optional[dict[str, Any]]:
     try:
         payload = jwt.decode(
             token,
-            settings.secret_key,
+            settings.effective_jwt_secret,
             algorithms=[settings.algorithm],
         )
         
@@ -76,7 +76,7 @@ def verify_refresh_token(token: str) -> Optional[dict[str, Any]]:
     try:
         payload = jwt.decode(
             token,
-            settings.secret_key,
+            settings.effective_jwt_secret,
             algorithms=[settings.algorithm],
         )
         

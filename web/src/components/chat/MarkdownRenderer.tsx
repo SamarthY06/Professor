@@ -7,6 +7,8 @@ import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
 
+const SAFE_URL_RE = /^(https?:\/\/|mailto:|\/(?!\/))/i;
+
 // KaTeX CSS is imported in globals.css
 
 interface MarkdownRendererProps {
@@ -150,9 +152,11 @@ export function MarkdownRenderer({ content, className = '' }: MarkdownRendererPr
           
           // Custom styling for links
           a({ children, href, ...props }: any) {
+            const safeHref =
+              typeof href === 'string' && SAFE_URL_RE.test(href) ? href : '#';
             return (
               <a
-                href={href}
+                href={safeHref}
                 className="text-blue-600 dark:text-blue-400 hover:underline"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -239,9 +243,14 @@ export function MarkdownRenderer({ content, className = '' }: MarkdownRendererPr
           
           // Custom styling for images
           img({ src, alt, ...props }: any) {
+            const safeSrc =
+              typeof src === 'string' &&
+              /^(https?:\/\/|\/(?!\/))/i.test(src)
+                ? src
+                : '';
             return (
               <img
-                src={src}
+                src={safeSrc}
                 alt={alt || ''}
                 className="max-w-full h-auto rounded-lg my-4"
                 {...props}

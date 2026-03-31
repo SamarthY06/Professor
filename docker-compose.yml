@@ -3,9 +3,10 @@ services:
   postgres:
     image: pgvector/pgvector:pg15
     container_name: professor-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: professor
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-professor_dev_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: professor
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
@@ -24,6 +25,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: professor-redis
+    restart: unless-stopped
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - ./data/redis:/data
@@ -41,11 +43,12 @@ services:
   temporal:
     image: temporalio/auto-setup:1.22
     container_name: professor-temporal
+    restart: unless-stopped
     environment:
       - DB=postgresql
       - DB_PORT=5432
       - POSTGRES_USER=professor
-      - POSTGRES_PWD=${POSTGRES_PASSWORD:-professor_dev_password}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       - POSTGRES_SEEDS=postgres
       - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development.yaml
     depends_on:
@@ -62,6 +65,7 @@ services:
   temporal-ui:
     image: temporalio/ui:2.21.3
     container_name: professor-temporal-ui
+    restart: unless-stopped
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_CORS_ORIGINS=http://localhost:3000
@@ -76,6 +80,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.7.4
     container_name: professor-qdrant
+    restart: unless-stopped
     volumes:
       - qdrant_data:/qdrant/storage
     ports:
@@ -94,11 +99,12 @@ services:
       context: ./services/rag
       dockerfile: Dockerfile
     container_name: professor-rag-service
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
-      - SYNC_DATABASE_URL=postgresql://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/professor_rag
+      - SYNC_DATABASE_URL=postgresql://professor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/professor_rag
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - TEMPORAL_HOST=temporal
@@ -137,8 +143,8 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
-      - SYNC_DATABASE_URL=postgresql://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor_rag
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/professor_rag
+      - SYNC_DATABASE_URL=postgresql://professor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/professor_rag
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - TEMPORAL_HOST=temporal
@@ -169,7 +175,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/professor
       - REDIS_URL=redis://redis:6379
       - REDIS_HOST=redis
       - TEMPORAL_HOST=temporal:7233
@@ -200,18 +206,19 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: professor-backend
+    restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
       - ./backend/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor
-      - DATABASE_URL_SYNC=postgresql://professor:${POSTGRES_PASSWORD:-professor_dev_password}@postgres:5432/professor
+      - DATABASE_URL=postgresql+asyncpg://professor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/professor
+      - DATABASE_URL_SYNC=postgresql://professor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/professor
       - REDIS_URL=redis://redis:6379
       - REDIS_HOST=redis
       - TEMPORAL_HOST=temporal:7233
       - FRONTEND_URL=http://localhost:3000
-      - ENVIRONMENT=development
+      - ENVIRONMENT=${ENVIRONMENT:-development}
       - RAG_BASE_URL=http://rag-service:8000
     depends_on:
       postgres:
@@ -244,13 +251,14 @@ services:
       args:
         - NEXT_PUBLIC_API_URL=http://localhost:8000
     container_name: professor-web
+    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
       - NEXT_PUBLIC_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - NEXTAUTH_URL=http://localhost:3000
-      - NEXTAUTH_SECRET=${JWT_SECRET_KEY:-super_secret_key_change_in_production}
+      - NEXTAUTH_SECRET=${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
     depends_on:
       - backend
     ports:
@@ -298,7 +306,7 @@ services:
     container_name: professor-grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-professor_grafana}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana_data:/var/lib/grafana
@@ -315,8 +323,6 @@ networks:
     driver: bridge
 
 volumes:
-  postgres_data:
-  redis_data:
   qdrant_data:
   prometheus_data:
   grafana_data:

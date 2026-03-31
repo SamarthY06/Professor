@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     jwt_secret_key: Optional[str] = None
     encryption_key: str = "CHANGE_ME_IN_PRODUCTION_32CHARS!"
     
+    @property
+    def effective_jwt_secret(self) -> str:
+        """JWT signing key: uses jwt_secret_key if set, falls back to secret_key."""
+        return self.jwt_secret_key or self.secret_key
+    
     @model_validator(mode="after")
     def _validate_production_secrets(self):
         is_prod = self.environment in ("production", "staging")
@@ -63,7 +68,7 @@ class Settings(BaseSettings):
                 raise ValueError("OPENAI_API_KEY must be set in production/staging")
         return self
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60 * 24
+    access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 7
     
     # Google OAuth

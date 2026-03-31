@@ -25,8 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+COPY --from=builder /root/.local /app/.local
+ENV PATH=/app/.local/bin:$PATH
+ENV PYTHONPATH=/app/.local/lib/python3.11/site-packages:$PYTHONPATH
 
 # Copy application code
 COPY . .
@@ -34,8 +35,11 @@ COPY . .
 # Make scripts executable
 RUN chmod +x scripts/*.sh
 
-# Create directories for uploads and processed files
-RUN mkdir -p /app/uploads /app/processed
+# Non-root user: data dirs and full /app tree (including /app/.local) owned by appuser
+RUN useradd -r -s /bin/false appuser && \
+    mkdir -p /app/uploads /app/processed && \
+    chown -R appuser:appuser /app
+USER appuser
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

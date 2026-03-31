@@ -12,6 +12,11 @@ type SignupStep = 'email' | 'verify' | 'details'
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID
 
+function getSafeRedirect(param: string | null): string {
+  if (!param || !param.startsWith('/') || param.startsWith('//')) return '/dashboard'
+  return param
+}
+
 function LoginContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -39,7 +44,7 @@ function LoginContent() {
   const [resendCooldown, setResendCooldown] = useState(0)
   const codeInputRefs = useRef<(HTMLInputElement | null)[]>([])
 
-  const redirectUrl = searchParams.get('redirect') || '/dashboard'
+  const redirectUrl = getSafeRedirect(searchParams.get('redirect'))
 
   // Google OAuth callback — use a ref to ensure we only attempt the exchange once per code
   const googleCodeHandled = useRef<string | null>(null)

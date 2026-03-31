@@ -178,7 +178,6 @@ export default function SystemPage() {
     setSyncingPricing(true);
     try {
       const result = await admin.triggerPricingSync(t);
-      console.log('Pricing sync result:', result);
       await fetchData();
     } catch (err) {
       console.error('Failed to sync pricing:', err);

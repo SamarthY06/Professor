@@ -9,8 +9,8 @@ class RAGConfig(BaseSettings):
     
     # External RAG service URL (Textbook_RAG service)
     rag_base_url: str = "http://localhost:8001"
-    rag_admin_username: str = "admin"
-    rag_admin_password: str = "admin123"
+    rag_admin_username: str = ""
+    rag_admin_password: str = ""
     rag_request_timeout: int = 30
     rag_poll_interval_seconds: int = 5
     rag_max_retries: int = 3
