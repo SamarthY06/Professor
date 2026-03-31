@@ -1356,6 +1356,28 @@ export const notes = {
     fetchApi(`/api/notes/${noteId}/pin`, { method: 'POST', token }),
 }
 
+const voice = {
+  transcribe: async (token: string, audioBlob: Blob): Promise<{ text: string }> => {
+    const formData = new FormData()
+    const ext = audioBlob.type.includes('mp4') ? 'mp4' : audioBlob.type.includes('ogg') ? 'ogg' : 'webm'
+    formData.append('file', audioBlob, `recording.${ext}`)
+
+    const response = await fetch(`${API_URL}/api/voice/transcribe`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.detail || 'Transcription failed')
+    }
+
+    return response.json()
+  },
+}
+
 export default {
   auth,
   users,
@@ -1368,4 +1390,5 @@ export default {
   admin,
   notes,
   usage,
+  voice,
 }

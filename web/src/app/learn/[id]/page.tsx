@@ -23,6 +23,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import SelectionToNotes from '@/components/SelectionToNotes';
 import { notesStore, NotePage } from '@/lib/notes-store';
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer';
+import VoiceInput from '@/components/chat/VoiceInput';
 
 // Types matching backend models
 interface Message {
@@ -680,29 +681,38 @@ export default function LearnPage() {
           <div className="max-w-3xl mx-auto">
             <div className="flex items-end gap-4">
               <div className="flex-1 bg-gray-50 dark:bg-gray-900 rounded-xl border dark:border-gray-700 focus-within:border-blue-300 dark:focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100 dark:focus-within:ring-blue-900/50">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
+                <div className="flex items-end">
+                  <textarea
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
+                    placeholder={
+                      mode === 'config_gathering' || mode === 'greeting'
+                        ? "Share your thoughts..."
+                        : mode === 'planning'
+                        ? "Say 'yes' to start, or tell me what to change..."
+                        : mode === 'quiz' 
+                        ? "What's your answer?" 
+                        : "Ask me anything, or say 'continue' to keep going..."
                     }
-                  }}
-                  placeholder={
-                    mode === 'config_gathering' || mode === 'greeting'
-                      ? "Share your thoughts..."
-                      : mode === 'planning'
-                      ? "Say 'yes' to start, or tell me what to change..."
-                      : mode === 'quiz' 
-                      ? "What's your answer?" 
-                      : "Ask me anything, or say 'continue' to keep going..."
-                  }
-                  className="w-full px-4 py-3 bg-transparent resize-none outline-none min-h-[48px] max-h-[200px] text-foreground"
-                  rows={1}
-                  disabled={isLoading}
-                  aria-label="Type your message"
-                />
+                    className="flex-1 px-4 py-3 bg-transparent resize-none outline-none min-h-[48px] max-h-[200px] text-foreground"
+                    rows={1}
+                    disabled={isLoading}
+                    aria-label="Type your message"
+                  />
+                  <div className="pr-2 pb-2">
+                    <VoiceInput
+                      onTranscription={(text) => setInput((prev) => prev ? `${prev} ${text}` : text)}
+                      disabled={isLoading}
+                      token={token || ''}
+                    />
+                  </div>
+                </div>
               </div>
               <button
                 onClick={handleSend}

@@ -222,7 +222,7 @@ Instrumentator(
 
 
 # Include API routers
-from app.api import auth, users, books, goals, chat, learning, quiz, notes, admin, planning, usage
+from app.api import auth, users, books, goals, chat, learning, quiz, notes, admin, planning, usage, voice
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/api/users", tags=["Users"])
@@ -235,6 +235,7 @@ app.include_router(quiz.router, prefix="/api/quiz", tags=["Quiz"])
 app.include_router(notes.router, prefix="/api/notes", tags=["Notes"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(usage.router, prefix="/api/usage", tags=["Usage & Billing"])
+app.include_router(voice.router, prefix="/api/voice", tags=["Voice"])
 
 
 @app.get("/", tags=["Root"])
